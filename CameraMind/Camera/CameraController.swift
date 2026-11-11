@@ -229,7 +229,7 @@ extension UIImage {
 
 enum WhiteBalance {
     /// 开尔文 → RGB（Tanner Helland 近似），再归一化为设备增益
-    static func gains(kelvin: Double, tint: Double, maxGain: Float) -> AVCaptureDevice.DeviceWhiteBalanceGains {
+    static func gains(kelvin: Double, tint: Double, maxGain: Float) -> AVCaptureDevice.WhiteBalanceGains {
         let t = max(2000, min(kelvin, 10000)) / 100
         var r: Double, g: Double, b: Double
 
@@ -254,6 +254,6 @@ enum WhiteBalance {
         // 归一化到绿=1，并夹到设备允许范围
         let nr = r / g, nb = b / g
         let clamp: (Double) -> Float = { Float(min(max($0, 1.0), Double(maxGain))) }
-        return AVCaptureDevice.DeviceWhiteBalanceGains(redGain: clamp(nr), greenGain: 1.0, blueGain: clamp(nb))
+        return AVCaptureDevice.WhiteBalanceGains(redGain: clamp(nr), greenGain: 1.0, blueGain: clamp(nb))
     }
 }
