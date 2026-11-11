@@ -24,6 +24,26 @@ final class CameraController: NSObject, ObservableObject {
 
     // MARK: 启动
     func start() {
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .authorized:
+            boot()
+        case .notDetermined:
+            AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    if granted {
+                        self.boot()
+                    } else {
+                        self.lastError = "相机权限被拒绝，请到「设置 → AI 相机」里打开"
+                    }
+                }
+            }
+        default:
+            lastError = "相机权限被拒绝，请到「设置 → AI 相机」里打开"
+        }
+    }
+
+    private func boot() {
         sessionQueue.async { [weak self] in
             guard let self else { return }
             if self.session.inputs.isEmpty { self.configure() }

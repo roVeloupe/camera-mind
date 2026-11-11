@@ -99,6 +99,26 @@ struct CameraView: View {
                     .frame(maxHeight: .infinity, alignment: .top)
                     .transition(.opacity)
             }
+
+            if !camera.isRunning, let err = camera.lastError {
+                VStack(spacing: 14) {
+                    Image(systemName: "camera.metering.unknown")
+                        .font(.system(size: 40, weight: .light))
+                    Text(err)
+                        .font(.callout)
+                        .multilineTextAlignment(.center)
+                    Button("打开设置") {
+                        if let url = URL(string: UIApplication.openSettingsURLString) {
+                            UIApplication.shared.open(url)
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+                .foregroundStyle(.white)
+                .padding(28)
+                .background(.black.opacity(0.75), in: RoundedRectangle(cornerRadius: 20))
+                .padding(40)
+            }
         }
         .statusBarHidden()
         .onAppear { camera.start() }
@@ -128,6 +148,9 @@ struct CameraView: View {
             if complete == true, !showResult { showResult = true }
         }
         .onChange(of: ai.errorMessage) { _, msg in
+            if let msg { flash(msg) }
+        }
+        .onChange(of: camera.lastError) { _, msg in
             if let msg { flash(msg) }
         }
     }

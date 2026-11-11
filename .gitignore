@@ -1,0 +1,5 @@
+CameraMind/Info.plist
+CameraMind.xcodeproj/
+*.xcuserstate
+.DS_Store
+dist/
