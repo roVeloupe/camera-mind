@@ -1,6 +1,6 @@
 import Foundation
 
-/// OpenAI 兼容客户端：流式接收模型自身的 thinking 与正文（纯 JSON）。
+/// OpenAI 兼容客户端：优先用 tool call 拿结构化参数，失败退回 JSON 正文。
 final class VisionClient {
 
     struct Config {
@@ -9,44 +9,66 @@ final class VisionClient {
         var model: String = "hy4free"
         var maxTokens: Int = 8000
         var temperature: Double = 0.35
-        /// 思考开关：none | qwen | reasoning（该网关默认就返回 reasoning，选 none 即可）
+        /// 思考开关：none | qwen | reasoning
         var thinkingStyle: String = "none"
+        /// 是否优先使用 tool call（比裸 JSON 稳，尤其是 only_reasoning 模型）
+        var useTools: Bool = true
     }
 
     enum Event {
         case reasoning(String)   // 模型自身 thinking 增量
-        case content(String)     // JSON 正文增量
+        case toolArgs(String)    // tool call 的 arguments 增量（JSON 片段）
+        case content(String)     // 正文增量（JSON 模式下才有）
         case done
+    }
+
+    /// 一次请求的形态，按可靠性从高到低重试
+    private enum Mode {
+        case toolForced   // 强制调用指定工具
+        case toolAuto     // 让模型自己决定
+        case jsonObject   // response_format=json_object
+        case plain        // 什么都不加
     }
 
     private(set) var config: Config
     init(config: Config) { self.config = config }
     func update(_ config: Config) { self.config = config }
 
+    static let toolName = "apply_camera_settings"
+
     // MARK: - 发起请求
     func analyze(imageJPEG: Data, snapshot: CameraSnapshot) -> AsyncThrowingStream<Event, Error> {
         AsyncThrowingStream { continuation in
             let task = Task { [config] in
-                do {
+                var modes: [Mode] = [.toolForced, .toolAuto]
+                if config.useTools == false { modes = [] }
+                modes += [.jsonObject, .plain]
+
+                var producedAnything = false
+                for mode in modes {
+                    if producedAnything { break }
                     do {
-                        try await Self.stream(config: config, imageJPEG: imageJPEG,
-                                              snapshot: snapshot, jsonMode: true,
-                                              into: continuation)
+                        producedAnything = try await Self.stream(config: config,
+                                                                 imageJPEG: imageJPEG,
+                                                                 snapshot: snapshot,
+                                                                 mode: mode,
+                                                                 into: continuation)
                     } catch let error as ClientError {
-                        // 有些服务不支持 response_format + 图片，去掉后重试一次
+                        // 400/422 多半是参数不被支持，换下一种形态
                         if case .http(let code, _) = error, code == 400 || code == 422 {
-                            try await Self.stream(config: config, imageJPEG: imageJPEG,
-                                                  snapshot: snapshot, jsonMode: false,
-                                                  into: continuation)
-                        } else {
-                            throw error
+                            continue
                         }
+                        continuation.finish(throwing: error)
+                        return
+                    } catch {
+                        continuation.finish(throwing: error)
+                        return
                     }
-                    continuation.yield(.done)
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
                 }
+                if !producedAnything {
+                    continuation.yield(.done)
+                }
+                continuation.finish()
             }
             continuation.onTermination = { _ in task.cancel() }
         }
@@ -55,14 +77,13 @@ final class VisionClient {
     private static func stream(config: Config,
                                imageJPEG: Data,
                                snapshot: CameraSnapshot,
-                               jsonMode: Bool,
-                               into continuation: AsyncThrowingStream<Event, Error>.Continuation) async throws {
+                               mode: Mode,
+                               into continuation: AsyncThrowingStream<Event, Error>.Continuation) async throws -> Bool {
+        var produced = false
         let request = try buildRequest(config: config, imageJPEG: imageJPEG,
-                                       snapshot: snapshot, jsonMode: jsonMode)
+                                       snapshot: snapshot, mode: mode)
         let (bytes, response) = try await URLSession.shared.bytes(for: request)
-        guard let http = response as? HTTPURLResponse else {
-            throw ClientError.badResponse
-        }
+        guard let http = response as? HTTPURLResponse else { throw ClientError.badResponse }
         guard (200..<300).contains(http.statusCode) else {
             var body = ""
             for try await line in bytes.lines { body += line }
@@ -83,56 +104,34 @@ final class VisionClient {
             for key in ["reasoning_content", "reasoning", "thinking", "reasoning_text"] {
                 if let s = delta[key] as? String, !s.isEmpty {
                     continuation.yield(.reasoning(s))
+                    produced = true
                 }
             }
+
+            // tool call 的 arguments 是分片到达的
+            if let calls = delta["tool_calls"] as? [[String: Any]] {
+                for call in calls {
+                    if let fn = call["function"] as? [String: Any],
+                       let args = fn["arguments"] as? String, !args.isEmpty {
+                        continuation.yield(.toolArgs(args))
+                        produced = true
+                    }
+                }
+            }
+
             if let s = delta["content"] as? String, !s.isEmpty {
                 continuation.yield(.content(s))
+                produced = true
             }
         }
-    }
-
-    // MARK: - 连通性探测
-    /// 返回 (是否可用, 描述)。只请求 /models，不消耗额度。
-    static func probe(_ config: Config) async -> (Bool, String) {
-        let base = config.baseURL.hasSuffix("/") ? String(config.baseURL.dropLast()) : config.baseURL
-        guard let url = URL(string: base + "/models") else {
-            return (false, "Base URL 格式错误")
-        }
-        var req = URLRequest(url: url)
-        req.timeoutInterval = 20
-        req.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
-        do {
-            let (data, resp) = try await URLSession.shared.data(for: req)
-            guard let http = resp as? HTTPURLResponse else { return (false, "无 HTTP 响应") }
-            let text = String(data: data, encoding: .utf8) ?? ""
-            if (200..<300).contains(http.statusCode) {
-                // 尝试提取模型名，方便确认是否支持视觉模型
-                if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let list = obj["data"] as? [[String: Any]] {
-                    let ids = list.compactMap { $0["id"] as? String }
-                    let vision = ids.filter {
-                        let l = $0.lowercased()
-                        return l.contains("vl") || l.contains("vision") || l.contains("4v") || l.contains("omni")
-                    }
-                    let preview = ids.prefix(6).joined(separator: ", ")
-                    let note = vision.isEmpty
-                        ? "（未发现明显的视觉模型）"
-                        : "，视觉候选：\(vision.prefix(4).joined(separator: ", "))"
-                    return (true, "连通，\(ids.count) 个模型：\(preview)\(note)")
-                }
-                return (true, "连通")
-            }
-            return (false, "HTTP \(http.statusCode)：\(String(text.prefix(200)))")
-        } catch {
-            return (false, error.localizedDescription)
-        }
+        return produced
     }
 
     // MARK: - 构造请求
     private static func buildRequest(config: Config,
                                      imageJPEG: Data,
                                      snapshot: CameraSnapshot,
-                                     jsonMode: Bool) throws -> URLRequest {
+                                     mode: Mode) throws -> URLRequest {
         let base = config.baseURL.hasSuffix("/") ? String(config.baseURL.dropLast()) : config.baseURL
         guard let url = URL(string: base + "/chat/completions") else {
             throw ClientError.badConfig("baseURL 无效：\(config.baseURL)")
@@ -152,16 +151,25 @@ final class VisionClient {
                 ]]
             ]
         ]
-        if jsonMode {
+
+        switch mode {
+        case .toolForced:
+            body["tools"] = tools
+            body["tool_choice"] = ["type": "function",
+                                   "function": ["name": toolName]]
+        case .toolAuto:
+            body["tools"] = tools
+            body["tool_choice"] = "auto"
+        case .jsonObject:
             body["response_format"] = ["type": "json_object"]
-        }
-        switch config.thinkingStyle {
-        case "qwen":
-            body["chat_template_kwargs"] = ["enable_thinking": true]
-        case "reasoning":
-            body["reasoning_effort"] = "high"
-        default:
+        case .plain:
             break
+        }
+
+        switch config.thinkingStyle {
+        case "qwen": body["chat_template_kwargs"] = ["enable_thinking": true]
+        case "reasoning": body["reasoning_effort"] = "high"
+        default: break
         }
 
         var req = URLRequest(url: url)
@@ -172,7 +180,166 @@ final class VisionClient {
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
         return req
     }
-}
+
+    // MARK: - 工具定义
+    private static func num(_ lo: Double, _ hi: Double) -> [String: Any] {
+        ["type": "number", "minimum": lo, "maximum": hi]
+    }
+
+    private static var captureSchema: [String: Any] {
+        [
+            "type": "object",
+            "properties": [
+                "lens": ["type": "string", "enum": ["ultraWide", "wide", "tele"]],
+                "zoom": num(1, 20),
+                "iso": num(20, 6400),
+                "shutterSeconds": num(0.0001, 2),
+                "exposureMode": ["type": "string", "enum": ["auto", "manual"]],
+                "exposureBias": num(-8, 8),
+                "focusMode": ["type": "string", "enum": ["auto", "locked"]],
+                "lensPosition": num(0, 1),
+                "whiteBalanceMode": ["type": "string", "enum": ["auto", "locked"]],
+                "temperature": num(2000, 10000),
+                "tint": num(-150, 150),
+                "torch": num(0, 1),
+                "hdr": ["type": "boolean"],
+                "stabilization": ["type": "string", "enum": ["off", "standard", "cinematic"]],
+                "aspect": ["type": "string", "enum": ["4:3", "16:9", "1:1"]]
+            ],
+            "required": ["zoom", "exposureMode", "focusMode", "whiteBalanceMode",
+                         "temperature", "tint", "aspect"]
+        ]
+    }
+
+    private static var gradeSchema: [String: Any] {
+        [
+            "type": "object",
+            "properties": [
+                "exposureEV": num(-3, 3),
+                "brightness": num(-1, 1),
+                "contrast": num(-1, 1),
+                "highlights": num(-1, 1),
+                "shadows": num(-1, 1),
+                "blacks": num(-1, 1),
+                "whites": num(-1, 1),
+                "gamma": num(0.5, 2.0),
+                "clarity": num(-1, 1),
+                "texture": num(-1, 1),
+                "dehaze": num(-1, 1),
+                "fade": num(0, 1),
+                "curveShadows": num(-1, 1),
+                "curveMidtones": num(-1, 1),
+                "curveHighlights": num(-1, 1),
+                "temperature": num(-100, 100),
+                "tint": num(-100, 100),
+                "vibrance": num(-1, 1),
+                "saturation": num(-1, 1),
+                "hueShift": num(-180, 180),
+                "monochromeMix": num(0, 1),
+                "splitShadowHue": num(0, 360),
+                "splitShadowSat": num(0, 1),
+                "splitHighlightHue": num(0, 360),
+                "splitHighlightSat": num(0, 1),
+                "sharpness": num(0, 1),
+                "noiseReduction": num(0, 1),
+                "noiseReductionDetail": num(0, 1),
+                "grain": num(0, 1),
+                "grainSize": num(0, 1),
+                "vignette": num(-1, 1),
+                "vignetteFeather": num(0, 1),
+                "bloom": num(0, 1),
+                "halation": num(0, 1),
+                "chromaticAberration": num(-1, 1),
+                "straightenAngle": num(-45, 45),
+                "cropZoom": num(1, 2),
+                "perspectiveVertical": num(-1, 1),
+                "perspectiveHorizontal": num(-1, 1),
+                "rotate90": ["type": "integer", "enum": [0, 1, 2, 3]],
+                "style": ["type": "string",
+                          "enum": ["natural", "cinematic", "portrait", "landscape",
+                                   "street", "film", "moody", "vivid"]],
+                "styleStrength": num(0, 1),
+                "hsl": [
+                    "type": "array",
+                    "minItems": 8,
+                    "maxItems": 8,
+                    "items": [
+                        "type": "object",
+                        "properties": [
+                            "center": num(0, 360),
+                            "hue": num(-30, 30),
+                            "saturation": num(-1, 1),
+                            "luminance": num(-1, 1)
+                        ],
+                        "required": ["center"]
+                    ]
+                ]
+            ],
+            "required": ["exposureEV", "contrast", "highlights", "shadows",
+                         "temperature", "tint", "vibrance", "saturation",
+                         "clarity", "sharpness", "vignette"]
+        ]
+    }
+
+    private static var tools: [[String: Any]] {
+        [[
+            "type": "function",
+            "function": [
+                "name": toolName,
+                "description": "把完整的相机参数应用到当前取景画面。capture 控制硬件，grade 控制调色。必须一次性给出 capture 与 grade 两个完整对象。",
+                "parameters": [
+                    "type": "object",
+                    "properties": [
+                        "capture": captureSchema,
+                        "grade": gradeSchema,
+                        "rationale": [
+                            "type": "object",
+                            "additionalProperties": ["type": "string"],
+                            "description": "字段名 -> 一句话理由，至少 8 条"
+                        ],
+                        "warnings": ["type": "array", "items": ["type": "string"]],
+                        "confidence": num(0, 1)
+                    ],
+                    "required": ["capture", "grade"]
+                ]
+            ]
+        ]]
+    }
+
+    // MARK: - 连通性探测
+    /// 返回 (是否可用, 描述)。只请求 /models，不消耗额度。
+    static func probe(_ config: Config) async -> (Bool, String) {
+        let base = config.baseURL.hasSuffix("/") ? String(config.baseURL.dropLast()) : config.baseURL
+        guard let url = URL(string: base + "/models") else {
+            return (false, "Base URL 格式错误")
+        }
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 20
+        req.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
+        do {
+            let (data, resp) = try await URLSession.shared.data(for: req)
+            guard let http = resp as? HTTPURLResponse else { return (false, "无 HTTP 响应") }
+            let text = String(data: data, encoding: .utf8) ?? ""
+            if (200..<300).contains(http.statusCode) {
+                if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let list = obj["data"] as? [[String: Any]] {
+                    let ids = list.compactMap { $0["id"] as? String }
+                    let vision = ids.filter {
+                        let l = $0.lowercased()
+                        return l.contains("vl") || l.contains("vision") || l.contains("4v") || l.contains("omni")
+                    }
+                    let note = vision.isEmpty ? "（未发现明显的视觉模型）"
+                                              : "，视觉候选：\(vision.prefix(4).joined(separator: ", "))"
+                    return (true, "连通，\(ids.count) 个模型：\(ids.prefix(6).joined(separator: ", "))\(note)")
+                }
+                return (true, "连通")
+            }
+            return (false, "HTTP \(http.statusCode)：\(String(text.prefix(200)))")
+        } catch {
+            return (false, error.localizedDescription)
+        }
+    }
+
 
 // MARK: - 错误
 enum ClientError: LocalizedError {

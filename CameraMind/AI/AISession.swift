@@ -36,6 +36,14 @@ final class AISession: ObservableObject {
                     case .reasoning(let s):
                         self.thinking += s
                         self.elapsed = Date().timeIntervalSince(started)
+                    case .toolArgs(let s):
+                        // tool call 的 arguments，结构与直接返回的 JSON 一致
+                        self.rawJSON += s
+                        self.elapsed = Date().timeIntervalSince(started)
+                        if let parsed = self.parse(baseCapture: snapshot.capture,
+                                                   baseGrade: snapshot.grade) {
+                            self.result = parsed
+                        }
                     case .content(let s):
                         self.rawJSON += s
                         self.elapsed = Date().timeIntervalSince(started)

@@ -45,11 +45,16 @@ struct CameraView: View {
     @State private var isCapturing = false
     @State private var isShooting = false
     @State private var toast: String?
-    @State private var appliedOnce = false
     @State private var baseline: GradeParameters = .identity
     @State private var changes: [ParamChange] = []
 
     private let renderer = GradeRenderer()
+    @Environment(\.scenePhase) private var scenePhase
+
+    /// 有弹层盖住取景，或 App 不在前台时，停掉采集省电
+    private var cameraShouldRun: Bool {
+        !showThinking && !showManual && !showSettings && scenePhase == .active
+    }
 
     var body: some View {
         ZStack {
@@ -93,9 +98,17 @@ struct CameraView: View {
         .onAppear { camera.start() }
         .onDisappear { camera.stop() }
         .onChange(of: camera.isRunning) { _, running in
-            if running, !appliedOnce {
-                appliedOnce = true
-                camera.apply(store.capture)
+            // 每次恢复取景都重新下发一次，避免系统重置自动曝光
+            if running { camera.apply(store.capture) }
+        }
+        .onChange(of: cameraShouldRun) { _, shouldRun in
+            if shouldRun { camera.start() } else { camera.stop() }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active {
+                if cameraShouldRun { camera.start() }
+            } else {
+                camera.stop()
             }
         }
         .sheet(isPresented: $showSettings) { SettingsView(settings: settings) }
