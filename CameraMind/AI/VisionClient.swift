@@ -19,13 +19,13 @@ final class VisionClient {
         case reasoning(String)   // 模型自身 thinking 增量
         case toolArgs(String)    // tool call 的 arguments 增量（JSON 片段）
         case content(String)     // 正文增量（JSON 模式下才有）
+        case reset              // 换一种请求形态重试，清空已收内容
         case done
     }
 
     /// 一次请求的形态，按可靠性从高到低重试
     private enum Mode {
-        case toolForced   // 强制调用指定工具
-        case toolAuto     // 让模型自己决定
+        case toolAuto     // tools + tool_choice=auto
         case jsonObject   // response_format=json_object
         case plain        // 什么都不加
     }
@@ -40,21 +40,20 @@ final class VisionClient {
     func analyze(imageJPEG: Data, snapshot: CameraSnapshot) -> AsyncThrowingStream<Event, Error> {
         AsyncThrowingStream { continuation in
             let task = Task { [config] in
-                var modes: [Mode] = [.toolForced, .toolAuto]
-                if config.useTools == false { modes = [] }
+                var modes: [Mode] = []
+                if config.useTools { modes.append(.toolAuto) }
                 modes += [.jsonObject, .plain]
 
-                var producedAnything = false
-                for mode in modes {
-                    if producedAnything { break }
+                for (index, mode) in modes.enumerated() {
+                    if index > 0 { continuation.yield(.reset) }
                     do {
-                        producedAnything = try await Self.stream(config: config,
-                                                                 imageJPEG: imageJPEG,
-                                                                 snapshot: snapshot,
-                                                                 mode: mode,
-                                                                 into: continuation)
+                        let usable = try await Self.stream(config: config,
+                                                           imageJPEG: imageJPEG,
+                                                           snapshot: snapshot,
+                                                           mode: mode,
+                                                           into: continuation)
+                        if usable { break }
                     } catch let error as ClientError {
-                        // 400/422 多半是参数不被支持，换下一种形态
                         if case .http(let code, _) = error, code == 400 || code == 422 {
                             continue
                         }
@@ -65,9 +64,7 @@ final class VisionClient {
                         return
                     }
                 }
-                if !producedAnything {
-                    continuation.yield(.done)
-                }
+                continuation.yield(.done)
                 continuation.finish()
             }
             continuation.onTermination = { _ in task.cancel() }
@@ -79,7 +76,8 @@ final class VisionClient {
                                snapshot: CameraSnapshot,
                                mode: Mode,
                                into continuation: AsyncThrowingStream<Event, Error>.Continuation) async throws -> Bool {
-        var produced = false
+        var argsBuffer = ""
+        var contentBuffer = ""
         let request = try buildRequest(config: config, imageJPEG: imageJPEG,
                                        snapshot: snapshot, mode: mode)
         let (bytes, response) = try await URLSession.shared.bytes(for: request)
@@ -104,7 +102,6 @@ final class VisionClient {
             for key in ["reasoning_content", "reasoning", "thinking", "reasoning_text"] {
                 if let s = delta[key] as? String, !s.isEmpty {
                     continuation.yield(.reasoning(s))
-                    produced = true
                 }
             }
 
@@ -113,18 +110,21 @@ final class VisionClient {
                 for call in calls {
                     if let fn = call["function"] as? [String: Any],
                        let args = fn["arguments"] as? String, !args.isEmpty {
+                        argsBuffer += args
                         continuation.yield(.toolArgs(args))
-                        produced = true
                     }
                 }
             }
 
             if let s = delta["content"] as? String, !s.isEmpty {
+                contentBuffer += s
                 continuation.yield(.content(s))
-                produced = true
             }
         }
-        return produced
+
+        // 只有拿到"含 capture/grade 的 JSON"或工具参数，才算这次尝试成功
+        if !argsBuffer.isEmpty, StreamingJSON.looksLikeParams(argsBuffer) { return true }
+        return StreamingJSON.looksLikeParams(contentBuffer)
     }
 
     // MARK: - 构造请求
@@ -153,10 +153,6 @@ final class VisionClient {
         ]
 
         switch mode {
-        case .toolForced:
-            body["tools"] = tools
-            body["tool_choice"] = ["type": "function",
-                                   "function": ["name": toolName]]
         case .toolAuto:
             body["tools"] = tools
             body["tool_choice"] = "auto"
@@ -174,7 +170,7 @@ final class VisionClient {
 
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
-        req.timeoutInterval = 180
+        req.timeoutInterval = 45
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
@@ -421,6 +417,12 @@ enum StreamingJSON {
 
     private static func isParamObject(_ obj: [String: Any]) -> Bool {
         obj["capture"] != nil || obj["grade"] != nil
+    }
+
+    /// 文本里是否已出现可用的参数对象（用于判断这次请求是否"成功"）
+    static func looksLikeParams(_ raw: String) -> Bool {
+        guard let (obj, _) = extract(raw) else { return false }
+        return isParamObject(obj)
     }
 
     private static func matchBrace(_ chars: [Character], from start: Int) -> Int? {

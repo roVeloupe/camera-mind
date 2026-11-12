@@ -52,6 +52,10 @@ final class AISession: ObservableObject {
                                                    baseGrade: snapshot.grade) {
                             self.result = parsed
                         }
+                    case .reset:
+                        // 换一种请求形态重试，丢弃上一种的正文，思考保留
+                        self.rawJSON = ""
+                        self.result = nil
                     case .done:
                         break
                     }
@@ -61,7 +65,7 @@ final class AISession: ObservableObject {
                                            baseGrade: snapshot.grade) {
                     self.result = parsed
                 } else if !self.rawJSON.isEmpty || !self.thinking.isEmpty {
-                    self.errorMessage = "返回内容里没有可用的参数 JSON"
+                    self.errorMessage = "该模型没有返回参数（不支持工具调用/JSON）。请换一个支持结构化输出的模型"
                 }
             } catch {
                 self.errorMessage = error.localizedDescription
