@@ -56,11 +56,15 @@ Base URL 填 `http://<电脑IP>:8787/v1`，Key 随意。mock 会先吐 thinking�
 
 ## 交互
 
-1. 打开就是取景画面，顶部显示 `ISO / 快门 / EV / 变焦` 摘要。
-2. 按中间 **AI** 键 → 抓一帧（1536px JPEG）→ 连同参数快照发出。
-3. 思考条实时滚动；点开是完整推理流，可切到 JSON 看原始输出。
-4. JSON 收完自动弹出「AI 方案」：效果图、参数逐项 diff（旧值 → 新值 + 一句理由）、现场风险。
-5. 点「应用」→ 硬件参数写回设备（取景立刻变），后期参数进入渲染管线；再拍就是这套参数。
+1. 打开即是实时取景，画面已经是**调色后**的效果（Metal 直渲，30fps）。
+2. 底部三键：**手动**（参数面板）、**AI**、**快门**。
+3. 按 **AI**：截取当前帧 → 连同参数快照发给模型 → 思考流实时显示。
+   参数**边收边套**到取景画面上，收完后再把硬件参数（ISO/快门/白平衡/变焦）下发给设备。
+   **不会拍照**，也不会打断取景。
+4. 按 **快门**：按当前硬件 + 调色参数拍一张，套完滤镜存进相册。
+5. 所有改动实时持久化（UserDefaults），下次打开直接沿用。
+
+顶部眼睛图标可切换「看原图」，用来对比调色效果。
 
 ## 参数覆盖
 
@@ -144,8 +148,8 @@ Base URL 填 `http://<电脑IP>:8787/v1`，Key 随意。mock 会先吐 thinking�
 
 ## 已知限制
 
-- **取景预览不做实时调色**。逐帧跑 CI 渲染会掉帧，所以后期效果作用在抓帧上；硬件参数
-  （ISO/快门/白平衡/变焦）是实时的。
+- 实时预览用 16³ LUT + 跳过颗粒/降噪/光晕，保证 30fps；**导出/拍照时用 32³ LUT 跑全链路**。
+- 白平衡开尔文换算是近似（Tanner Helland 算法 + 归一化），与专业色温计有偏差。
 - **halation / chromaticAberration** 已在协议与 UI 中，渲染目前是近似实现，后续可换成
   自写 Metal kernel。
 - **白平衡开尔文换算是近似**（Tanner Helland 算法 + 归一化），与专业色温计有偏差；
@@ -160,14 +164,16 @@ CameraMind/
 ├── project.yml                     # XcodeGen 工程描述
 ├── CameraMind/
 │   ├── App/CameraMindApp.swift
-│   ├── Camera/CameraController.swift    # 取景、手动参数、抓帧
+│   ├── Camera/CameraController.swift    # 取景、手动参数、抓帧、快门
+│   ├── Camera/CameraStore.swift         # 参数状态 + 持久化
 │   ├── Model/CameraParameters.swift     # 49 项参数模型
 │   ├── Model/AdjustmentParser.swift     # JSON → 结构体（含越界保护）
 │   ├── Model/SceneProbe.swift           # 画面客观指标
 │   ├── AI/VisionClient.swift            # SSE 流式 + 截断 JSON 补全
 │   ├── AI/PromptBuilder.swift           # system prompt / user payload
 │   ├── AI/AISession.swift               # 流状态机
-│   ├── Render/GradeRenderer.swift       # LUT + 滤镜链
+│   ├── Render/GradeRenderer.swift       # LUT + 滤镜链（32³ / 16³ 快慢两档）
+│   ├── Render/MetalCameraPreview.swift  # Metal 实时预览
 │   ├── UI/CameraView.swift
 │   ├── UI/Panels.swift                  # 思考 / 结果 / 参数 / 设置
 │   └── Info.plist
