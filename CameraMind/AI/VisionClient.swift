@@ -212,33 +212,46 @@ enum StreamingJSON {
         extract(raw)?.obj
     }
 
-    /// 从任意文本里挖出 JSON 对象（支持前后夹杂散文、截断中）
+    /// 从任意文本里挖出 JSON 对象。
+    /// 关键：模型输出的 hsl 里还有嵌套对象，必须优先取包含 capture/grade 的最外层。
     static func extract(_ raw: String) -> (obj: [String: Any], complete: Bool)? {
         let cleaned = sanitize(raw)
         guard !cleaned.isEmpty else { return nil }
 
-        if let obj = decode(cleaned) {
+        if let obj = decode(cleaned), isParamObject(obj) {
             return (obj, isBalanced(cleaned))
         }
 
-        // 从后往前找候选对象：模型常在 JSON 前后夹一段说明
-        let chars = Array(cleaned)
-        var found = 0
-        var i = chars.count - 1
-        while i >= 0 && found < 8 {
-            if chars[i] == "{", let end = matchBrace(chars, from: i) {
-                if let obj = decode(String(chars[i...end])) { return (obj, true) }
-                found += 1
-            }
-            i -= 1
+        let repaired = balance(cleaned)
+        if let obj = decode(repaired), isParamObject(obj) {
+            return (obj, false)
         }
 
-        if let end = cleaned.lastIndex(of: "}"),
-           let obj = decode(String(cleaned[...end])) {
-            return (obj, true)
+        // 枚举所有起点，取"含 capture/grade 且最长"的那个
+        let chars = Array(cleaned)
+        var best: [String: Any]?
+        var bestLen = 0
+        for i in chars.indices where chars[i] == "{" {
+            guard let end = matchBrace(chars, from: i) else { continue }
+            let len = end - i
+            guard len > bestLen else { continue }
+            guard let obj = decode(String(chars[i...end])), isParamObject(obj) else { continue }
+            best = obj
+            bestLen = len
         }
-        if let obj = decode(balance(cleaned)) { return (obj, false) }
+        if let best { return (best, true) }
+
+        if let obj = decode(repaired) { return (obj, false) }
+
+        for i in chars.indices.reversed() where chars[i] == "{" {
+            guard let end = matchBrace(chars, from: i) else { continue }
+            if let obj = decode(String(chars[i...end])) { return (obj, true) }
+        }
         return nil
+    }
+
+    private static func isParamObject(_ obj: [String: Any]) -> Bool {
+        obj["capture"] != nil || obj["grade"] != nil
     }
 
     private static func matchBrace(_ chars: [Character], from start: Int) -> Int? {

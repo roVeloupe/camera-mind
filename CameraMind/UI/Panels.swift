@@ -1,311 +1,256 @@
 import SwiftUI
 import CoreImage
 
-// MARK: - 思考面板
+// MARK: - 手动参数面板
+struct ManualPanel: View {
+    @ObservedObject var store: CameraStore
+    @ObservedObject var camera: CameraController
+    let capabilities: DeviceCapabilities?
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                hardwareSection
+                toneSection
+                colorSection
+                detailSection
+                resetSection
+            }
+            .navigationTitle("参数")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("完成") { camera.apply(store.capture); dismiss() }.bold()
+                }
+            }
+        }
+        .onDisappear { camera.apply(store.capture) }
+    }
+
+    // MARK: 硬件
+    private var hardwareSection: some View {
+        Section {
+            Toggle("手动曝光", isOn: Binding(
+                get: { store.capture.exposureMode == "manual" },
+                set: { store.capture.exposureMode = $0 ? "manual" : "auto" }
+            ))
+
+            if store.capture.exposureMode == "manual" {
+                slider("ISO", $store.capture.iso,
+                       (capabilities?.minISO ?? 34)...(min(capabilities?.maxISO ?? 3200, 6400)),
+                       format: "%.0f")
+                slider("快门 1/x 秒", Binding(
+                    get: { 1.0 / max(store.capture.shutterSeconds, 0.0001) },
+                    set: { store.capture.shutterSeconds = 1.0 / max($0, 1) }
+                ), 8...8000, format: "1/%.0f")
+            } else {
+                slider("曝光补偿", $store.capture.exposureBias, -2...2, format: "%+.1f EV")
+            }
+
+            slider("变焦", $store.capture.zoom, 1...Double(min(capabilities?.maxZoom ?? 5, 10)),
+                   format: "%.1fx")
+
+            slider("色温", $store.capture.temperature, 2000...9000, format: "%.0f K")
+            slider("色调", $store.capture.tint, -100...100, format: "%+.0f")
+
+            Toggle("锁定白平衡", isOn: Binding(
+                get: { store.capture.whiteBalanceMode == "locked" },
+                set: { store.capture.whiteBalanceMode = $0 ? "locked" : "auto" }
+            ))
+
+            if camera.capabilities?.hasTorch == true {
+                slider("补光灯", $store.capture.torch, 0...1, format: "%.2f")
+            }
+        } header: {
+            Text("硬件（实时生效）")
+        } footer: {
+            Text("ISO 与快门只在手动曝光下有效；白平衡锁定后色温、色调才会下发给设备。")
+        }
+    }
+
+    // MARK: 影调
+    private var toneSection: some View {
+        Section("影调") {
+            slider("曝光", $store.grade.exposureEV, -2...2, format: "%+.2f")
+            slider("对比度", $store.grade.contrast, -1...1, format: "%+.2f")
+            slider("高光", $store.grade.highlights, -1...1, format: "%+.2f")
+            slider("阴影", $store.grade.shadows, -1...1, format: "%+.2f")
+            slider("黑场", $store.grade.blacks, -1...1, format: "%+.2f")
+            slider("白场", $store.grade.whites, -1...1, format: "%+.2f")
+            slider("清晰度", $store.grade.clarity, -1...1, format: "%+.2f")
+            slider("纹理", $store.grade.texture, -1...1, format: "%+.2f")
+            slider("去雾", $store.grade.dehaze, -1...1, format: "%+.2f")
+            slider("褪色", $store.grade.fade, 0...1, format: "%.2f")
+            slider("Gamma", $store.grade.gamma, 0.6...1.8, format: "%.2f")
+        }
+    }
+
+    // MARK: 色彩
+    private var colorSection: some View {
+        Section("色彩") {
+            slider("色温偏移", $store.grade.temperature, -100...100, format: "%+.0f")
+            slider("色调偏移", $store.grade.tint, -100...100, format: "%+.0f")
+            slider("自然饱和度", $store.grade.vibrance, -1...1, format: "%+.2f")
+            slider("饱和度", $store.grade.saturation, -1...1, format: "%+.2f")
+            slider("色相旋转", $store.grade.hueShift, -180...180, format: "%+.0f")
+            slider("黑白", $store.grade.monochromeMix, 0...1, format: "%.2f")
+            slider("暗部染色", $store.grade.splitShadowSat, 0...1, format: "%.2f")
+            slider("高光染色", $store.grade.splitHighlightSat, 0...1, format: "%.2f")
+        }
+    }
+
+    // MARK: 细节
+    private var detailSection: some View {
+        Section("细节与光学") {
+            slider("锐化", $store.grade.sharpness, 0...1, format: "%.2f")
+            slider("降噪", $store.grade.noiseReduction, 0...1, format: "%.2f")
+            slider("颗粒", $store.grade.grain, 0...1, format: "%.2f")
+            slider("暗角", $store.grade.vignette, -1...1, format: "%+.2f")
+            slider("光晕", $store.grade.bloom, 0...1, format: "%.2f")
+            slider("校正角度", $store.grade.straightenAngle, -15...15, format: "%+.1f°")
+            slider("裁切放大", $store.grade.cropZoom, 1...2, format: "%.2f")
+        }
+    }
+
+    private var resetSection: some View {
+        Section {
+            Button("重置后期参数", role: .destructive) { store.resetGrade() }
+            Button("恢复全部默认", role: .destructive) {
+                store.resetAll()
+                camera.apply(store.capture)
+            }
+        }
+    }
+
+    // MARK: 通用滑杆
+    private func slider(_ title: String, _ value: Binding<Double>,
+                        _ range: ClosedRange<Double>, format: String) -> some View {
+        VStack(spacing: 2) {
+            HStack {
+                Text(title).font(.footnote)
+                Spacer()
+                Text(String(format: format, value.wrappedValue))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            Slider(value: value, in: range) { editing in
+                if !editing { camera.apply(store.capture) }
+            }
+            .tint(.orange)
+        }
+        .padding(.vertical, 2)
+    }
+}
+
+// MARK: - 推理过程
 struct ThinkingView: View {
     @ObservedObject var session: AISession
+    let changes: [ParamChange]
+
     @Environment(\.dismiss) private var dismiss
-    @State private var showJSON = false
+    @State private var tab = 0
 
     var body: some View {
         NavigationStack {
             ZStack {
                 Color.black.ignoresSafeArea()
                 VStack(spacing: 0) {
-                    Picker("", selection: $showJSON) {
-                        Text("思考").tag(false)
-                        Text("JSON").tag(true)
+                    Picker("", selection: $tab) {
+                        Text("思考").tag(0)
+                        Text("JSON").tag(1)
+                        Text("变更 \(changes.isEmpty ? "" : "\(changes.count)")").tag(2)
                     }
                     .pickerStyle(.segmented)
                     .padding(12)
 
-                    ScrollViewReader { proxy in
-                        ScrollView {
-                            Group {
-                                if showJSON {
-                                    Text(session.rawJSON.isEmpty ? "等待返回…" : session.rawJSON)
-                                        .font(.system(size: 11, design: .monospaced))
-                                        .foregroundStyle(.green.opacity(0.9))
-                                } else {
-                                    Text(session.thinking.isEmpty ? "模型尚未输出思考内容。部分模型需显式开启 thinking 参数。" : session.thinking)
-                                        .font(.system(size: 13, design: .monospaced))
-                                        .foregroundStyle(.white.opacity(0.88))
-                                }
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(16)
-                            .id("bottom")
-                        }
-                        .onChange(of: session.thinking) { _, _ in
-                            withAnimation(.linear(duration: 0.1)) { proxy.scrollTo("bottom", anchor: .bottom) }
-                        }
-                        .onChange(of: session.rawJSON) { _, _ in
-                            withAnimation(.linear(duration: 0.1)) { proxy.scrollTo("bottom", anchor: .bottom) }
-                        }
-                    }
-
-                    HStack {
-                        Circle()
-                            .fill(session.isStreaming ? Color.green : Color.gray)
-                            .frame(width: 7, height: 7)
-                        Text(session.isStreaming ? "流式接收中 · \(String(format: "%.1f", session.elapsed))s" : "已完成")
-                            .font(.caption2)
-                            .foregroundStyle(.white.opacity(0.6))
-                        Spacer()
-                        Text("\(session.thinking.count) 字")
-                            .font(.caption2.monospacedDigit())
-                            .foregroundStyle(.white.opacity(0.4))
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
+                    content
+                    footer
                 }
             }
-            .navigationTitle("推理过程")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("关闭") { dismiss() }
-                }
-            }
-            .preferredColorScheme(.dark)
-        }
-    }
-}
-
-// MARK: - 结果面板
-struct ResultView: View {
-    let base: CIImage?
-    let result: AdjustmentParser.Result
-    let baseGrade: GradeParameters
-    let onApply: () -> Void
-    let onClose: () -> Void
-
-    @State private var showOriginal = false
-    @State private var rendered: UIImage?
-
-    private let renderer = GradeRenderer()
-
-    var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(spacing: 16) {
-                    imageCard
-                    if let rationale = headline {
-                        Text(rationale)
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, 16)
-                    }
-                    diffSection
-                    if !result.warnings.isEmpty {
-                        warningSection
-                    }
-                }
-                .padding(.vertical, 12)
-            }
-            .background(Color(.systemGroupedBackground))
-            .navigationTitle("AI 方案")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("关闭", action: onClose)
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("应用", action: onApply).bold()
-                }
-            }
-        }
-        .onAppear(perform: renderPreview)
-        .onChange(of: result.grade) { _, _ in renderPreview() }
-    }
-
-    private var headline: String? {
-        let r = result.rationale
-        let priority = ["exposureEV", "contrast", "highlights", "shadows",
-                        "temperature", "tint", "vibrance", "clarity", "style"]
-        for key in priority {
-            if let v = r[key] { return v }
-        }
-        return r.values.first
-    }
-
-    private var imageCard: some View {
-        ZStack(alignment: .bottomTrailing) {
-            Group {
-                if let rendered {
-                    Image(uiImage: rendered).resizable().scaledToFit()
-                } else {
-                    Rectangle().fill(Color.black.opacity(0.08))
-                        .aspectRatio(4.0 / 3.0, contentMode: .fit)
-                        .overlay(ProgressView())
-                }
-            }
-            .clipShape(RoundedRectangle(cornerRadius: 16))
-
-            Button {
-                showOriginal.toggle()
-                renderPreview()
-            } label: {
-                Label(showOriginal ? "看效果" : "看原图",
-                      systemImage: showOriginal ? "wand.and.stars" : "photo")
-                    .font(.caption2.bold())
-                    .padding(.horizontal, 10).padding(.vertical, 7)
-                    .background(.ultraThinMaterial, in: Capsule())
-            }
-            .padding(10)
-        }
-        .padding(.horizontal, 16)
-    }
-
-    private var diffSection: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Text("参数变更 · \(changes.count) 项")
-                .font(.footnote.bold())
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 16).padding(.bottom, 8)
-
-            ForEach(changes, id: \.key) { item in
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        Text(item.key)
-                            .font(.footnote.monospaced())
-                            .foregroundStyle(.primary)
-                        Spacer()
-                        Text(item.from)
-                            .font(.caption2.monospacedDigit())
-                            .foregroundStyle(.secondary)
-                            .strikethrough()
-                        Image(systemName: "arrow.right")
-                            .font(.system(size: 8))
-                            .foregroundStyle(.tertiary)
-                        Text(item.to)
-                            .font(.caption2.monospacedDigit().bold())
-                            .foregroundStyle(.blue)
-                    }
-                    if let note = result.rationale[item.key] {
-                        Text(note)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-                .padding(.horizontal, 16).padding(.vertical, 9)
-
-                Divider().padding(.leading, 16)
-            }
-        }
-        .background(Color(.secondarySystemGroupedBackground),
-                    in: RoundedRectangle(cornerRadius: 14))
-        .padding(.horizontal, 16)
-    }
-
-    private var warningSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Label("现场提示", systemImage: "exclamationmark.triangle")
-                .font(.footnote.bold())
-                .foregroundStyle(.orange)
-            ForEach(result.warnings, id: \.self) { w in
-                Text("· \(w)").font(.caption).foregroundStyle(.secondary)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(14)
-        .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
-        .padding(.horizontal, 16)
-    }
-
-    private func renderPreview() {
-        guard let base else { return }
-        let params = showOriginal ? GradeParameters.identity : result.grade
-        rendered = renderer.makeUIImage(renderer.render(base, with: params))
-    }
-
-    // MARK: diff
-    private struct Change { let key: String; let from: String; let to: String }
-
-    private var changes: [Change] {
-        let a = dict(baseGrade), b = dict(result.grade)
-        var out: [Change] = []
-        for (k, v) in b {
-            let old = a[k] ?? "-"
-            if old != v {
-                out.append(Change(key: k, from: fmt(old), to: fmt(v)))
-            }
-        }
-        return out.sorted { $0.key < $1.key }
-    }
-
-    private func dict<T: Encodable>(_ value: T) -> [String: String] {
-        guard let data = try? JSONEncoder().encode(value),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [:] }
-        var out: [String: String] = [:]
-        for (k, v) in obj {
-            if let arr = v as? [Any] { continue }
-            out[k] = "\(v)"
-        }
-        return out
-    }
-
-    private func fmt(_ s: String) -> String {
-        guard let d = Double(s) else { return s }
-        return String(format: "%.2f", d)
-    }
-}
-
-// MARK: - 当前参数
-struct ParamsView: View {
-    let capture: CaptureParameters
-    let grade: GradeParameters
-    let capabilities: DeviceCapabilities?
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        NavigationStack {
-            List {
-                Section("硬件") {
-                    row("镜头", capture.lens)
-                    row("变焦", String(format: "%.1f×", capture.zoom))
-                    row("曝光模式", capture.exposureMode)
-                    row("ISO", String(format: "%.0f", capture.iso))
-                    row("快门", String(format: "1/%.0fs", 1 / max(capture.shutterSeconds, 0.0001)))
-                    row("曝光补偿", String(format: "%+.1f EV", capture.exposureBias))
-                    row("对焦", capture.focusMode)
-                    row("白平衡", "\(capture.whiteBalanceMode) · \(Int(capture.temperature))K")
-                }
-                if let c = capabilities {
-                    Section("设备能力") {
-                        row("镜头组", c.lenses.joined(separator: " / "))
-                        row("ISO", "\(Int(c.minISO)) – \(Int(c.maxISO))")
-                        row("最大变焦", String(format: "%.1f×", c.maxZoom))
-                    }
-                }
-                Section("后期") {
-                    row("曝光", String(format: "%+.2f", grade.exposureEV))
-                    row("对比度", String(format: "%+.2f", grade.contrast))
-                    row("高光", String(format: "%+.2f", grade.highlights))
-                    row("阴影", String(format: "%+.2f", grade.shadows))
-                    row("饱和度", String(format: "%+.2f", grade.saturation))
-                    row("自然饱和度", String(format: "%+.2f", grade.vibrance))
-                    row("清晰度", String(format: "%+.2f", grade.clarity))
-                    row("风格", "\(grade.style) · \(String(format: "%.2f", grade.styleStrength))")
-                }
-            }
-            .navigationTitle("当前参数")
+            .navigationTitle("AI")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) { Button("关闭") { dismiss() } }
             }
+            .preferredColorScheme(.dark)
         }
     }
 
-    private func row(_ k: String, _ v: String) -> some View {
-        HStack {
-            Text(k).foregroundStyle(.secondary)
-            Spacer()
-            Text(v).monospacedDigit()
+    @ViewBuilder
+    private var content: some View {
+        switch tab {
+        case 0:
+            ScrollViewReader { proxy in
+                ScrollView {
+                    Text(session.thinking.isEmpty
+                         ? "模型尚未输出思考内容。若该模型需要显式开启 thinking，请在设置里切换思考模式。"
+                         : session.thinking)
+                        .font(.system(size: 13, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.88))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(16)
+                        .id("bottom")
+                }
+                .onChange(of: session.thinking) { _, _ in
+                    withAnimation(.linear(duration: 0.1)) { proxy.scrollTo("bottom", anchor: .bottom) }
+                }
+            }
+        case 1:
+            ScrollViewReader { proxy in
+                ScrollView {
+                    Text(session.rawJSON.isEmpty ? "等待返回…" : session.rawJSON)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.green.opacity(0.9))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(16)
+                        .textSelection(.enabled)
+                        .id("bottom")
+                }
+                .onChange(of: session.rawJSON) { _, _ in
+                    withAnimation(.linear(duration: 0.1)) { proxy.scrollTo("bottom", anchor: .bottom) }
+                }
+            }
+        default:
+            List {
+                if changes.isEmpty {
+                    Text("本次没有产生可显示的变更（参数与当前一致，或解析尚未完成）")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(changes) { c in
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack {
+                                Text(c.key).font(.caption.monospaced())
+                                Spacer()
+                                Text(c.from).font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+                                Image(systemName: "arrow.right").font(.system(size: 8)).foregroundStyle(.tertiary)
+                                Text(c.to).font(.caption2.monospacedDigit().bold()).foregroundStyle(.orange)
+                            }
+                            if let note = c.note {
+                                Text(note).font(.caption2).foregroundStyle(.secondary)
+                            }
+                        }
+                        .listRowBackground(Color.white.opacity(0.04))
+                    }
+                }
+            }
+            .scrollContentBackground(.hidden)
         }
-        .font(.footnote)
+    }
+
+    private var footer: some View {
+        HStack {
+            Circle().fill(session.isStreaming ? Color.green : Color.gray)
+                .frame(width: 7, height: 7)
+            Text(session.isStreaming ? "流式接收中 · \(String(format: "%.1f", session.elapsed))s" : "已完成")
+                .font(.caption2).foregroundStyle(.white.opacity(0.6))
+            Spacer()
+            Text("\(session.rawJSON.count) 字符")
+                .font(.caption2.monospacedDigit()).foregroundStyle(.white.opacity(0.4))
+        }
+        .padding(.horizontal, 16).padding(.vertical, 10)
     }
 }
 
@@ -336,8 +281,7 @@ struct SettingsView: View {
                         Text("关闭").tag("none")
                     }
                     Text("模型是否输出 reasoning 由服务端决定。选错不会报错，只是思考面板可能为空。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 Section("检查") {
                     Button {
@@ -357,21 +301,20 @@ struct SettingsView: View {
                     }
                     .disabled(probing || settings.apiKey.isEmpty)
                     if let probeMessage {
-                        Text(probeMessage)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                        Text(probeMessage).font(.caption).foregroundStyle(.secondary)
                     }
                 }
                 Section {
-                    Text("需支持 OpenAI 兼容的 /chat/completions 与图片输入。思考内容读取 reasoning_content / reasoning / thinking 字段；若模型不支持，思考面板会为空，但 JSON 仍会流式解析。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    Text("参数改动会立即生效并自动保存，下次打开相机直接沿用。")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
             }
             .navigationTitle("设置")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) { Button("完成") { settings.save(); dismiss() } }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("完成") { settings.save(); dismiss() }
+                }
             }
         }
     }

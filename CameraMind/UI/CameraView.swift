@@ -1,6 +1,7 @@
 import SwiftUI
 import AVFoundation
 import CoreImage
+import UIKit
 
 // MARK: - 设置
 final class AppSettings: ObservableObject {
@@ -31,54 +32,38 @@ final class AppSettings: ObservableObject {
     }
 }
 
-// MARK: - 预览层
-struct CameraPreview: UIViewRepresentable {
-    let session: AVCaptureSession
-
-    func makeUIView(context: Context) -> PreviewView {
-        let v = PreviewView()
-        v.previewLayer.session = session
-        v.previewLayer.videoGravity = .resizeAspectFill
-        return v
-    }
-    func updateUIView(_ uiView: PreviewView, context: Context) {}
-}
-
-final class PreviewView: UIView {
-    override class var layerClass: AnyClass { AVCaptureVideoPreviewLayer.self }
-    var previewLayer: AVCaptureVideoPreviewLayer { layer as! AVCaptureVideoPreviewLayer }
-}
-
 // MARK: - 主界面
 struct CameraView: View {
     @StateObject private var camera = CameraController()
     @StateObject private var ai = AISession()
     @StateObject private var settings = AppSettings()
+    @StateObject private var store = CameraStore()
 
-    @State private var appliedGrade = GradeParameters.identity
     @State private var showSettings = false
     @State private var showThinking = false
-    @State private var showResult = false
-    @State private var showParams = false
+    @State private var showManual = false
     @State private var isCapturing = false
+    @State private var isShooting = false
     @State private var toast: String?
+    @State private var appliedOnce = false
+    @State private var baseline: GradeParameters = .identity
+    @State private var changes: [ParamChange] = []
+
+    private let renderer = GradeRenderer()
 
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
 
-            CameraPreview(session: camera.session)
+            MetalCameraPreview(controller: camera, grade: store.grade, showOriginal: store.showOriginal)
                 .ignoresSafeArea()
 
-            // 顶部 / 底部渐变
             VStack {
-                LinearGradient(colors: [.black.opacity(0.65), .clear],
-                               startPoint: .top, endPoint: .bottom)
-                    .frame(height: 140)
+                LinearGradient(colors: [.black.opacity(0.7), .clear], startPoint: .top, endPoint: .bottom)
+                    .frame(height: 150)
                 Spacer()
-                LinearGradient(colors: [.clear, .black.opacity(0.8)],
-                               startPoint: .top, endPoint: .bottom)
-                    .frame(height: 220)
+                LinearGradient(colors: [.clear, .black.opacity(0.85)], startPoint: .top, endPoint: .bottom)
+                    .frame(height: 230)
             }
             .ignoresSafeArea()
             .allowsHitTesting(false)
@@ -95,57 +80,42 @@ struct CameraView: View {
                     .font(.footnote)
                     .padding(.horizontal, 14).padding(.vertical, 9)
                     .background(.ultraThinMaterial, in: Capsule())
-                    .padding(.top, 100)
+                    .padding(.top, 96)
                     .frame(maxHeight: .infinity, alignment: .top)
                     .transition(.opacity)
             }
 
             if !camera.isRunning, let err = camera.lastError {
-                VStack(spacing: 14) {
-                    Image(systemName: "camera.metering.unknown")
-                        .font(.system(size: 40, weight: .light))
-                    Text(err)
-                        .font(.callout)
-                        .multilineTextAlignment(.center)
-                    Button("打开设置") {
-                        if let url = URL(string: UIApplication.openSettingsURLString) {
-                            UIApplication.shared.open(url)
-                        }
-                    }
-                    .buttonStyle(.borderedProminent)
-                }
-                .foregroundStyle(.white)
-                .padding(28)
-                .background(.black.opacity(0.75), in: RoundedRectangle(cornerRadius: 20))
-                .padding(40)
+                permissionCard(err)
             }
         }
         .statusBarHidden()
         .onAppear { camera.start() }
         .onDisappear { camera.stop() }
-        .sheet(isPresented: $showSettings) { SettingsView(settings: settings) }
-        .sheet(isPresented: $showThinking) { ThinkingView(session: ai) }
-        .sheet(isPresented: $showResult) {
-            if let result = ai.result {
-                ResultView(base: ai.baseImage,
-                           result: result,
-                           baseGrade: appliedGrade,
-                           onApply: {
-                               camera.apply(result.capture)
-                               appliedGrade = result.grade
-                               showResult = false
-                               flash("参数已应用")
-                           },
-                           onClose: { showResult = false })
+        .onChange(of: camera.isRunning) { _, running in
+            if running, !appliedOnce {
+                appliedOnce = true
+                camera.apply(store.capture)
             }
         }
-        .sheet(isPresented: $showParams) {
-            ParamsView(capture: camera.captureParams,
-                       grade: appliedGrade,
-                       capabilities: camera.capabilities)
+        .sheet(isPresented: $showSettings) { SettingsView(settings: settings) }
+        .sheet(isPresented: $showManual) {
+            ManualPanel(store: store, camera: camera, capabilities: camera.capabilities)
         }
-        .onChange(of: ai.result?.isComplete) { _, complete in
-            if complete == true, !showResult { showResult = true }
+        .sheet(isPresented: $showThinking) {
+            ThinkingView(session: ai, changes: changes)
+        }
+        .onChange(of: ai.result) { _, result in
+            guard let result else { return }
+            // 边收边套：预览立刻能看到效果
+            store.grade = result.grade
+            if result.isComplete {
+                store.capture = result.capture
+                camera.apply(result.capture)
+                changes = AdjustmentParser.diff(from: baseline, to: result.grade,
+                                                rationale: result.rationale ?? [:])
+                flash("已应用到相机 · \(changes.count) 项调色")
+            }
         }
         .onChange(of: ai.errorMessage) { _, msg in
             if let msg { flash(msg) }
@@ -155,15 +125,15 @@ struct CameraView: View {
         }
     }
 
-    // MARK: 顶部
+    // MARK: 顶栏
     private var topBar: some View {
-        HStack(spacing: 14) {
-            Button { showParams = true } label: {
+        HStack(spacing: 12) {
+            Button { showManual = true } label: {
                 Label(paramSummary, systemImage: "slider.horizontal.3")
                     .labelStyle(.titleAndIcon)
                     .font(.caption2.monospacedDigit())
-                    .padding(.horizontal, 10).padding(.vertical, 6)
-                    .background(.black.opacity(0.35), in: Capsule())
+                    .padding(.horizontal, 11).padding(.vertical, 7)
+                    .background(.black.opacity(0.38), in: Capsule())
                     .foregroundStyle(.white)
             }
 
@@ -171,51 +141,58 @@ struct CameraView: View {
 
             if ai.isStreaming {
                 HStack(spacing: 6) {
-                    ProgressView().tint(.white).scaleEffect(0.7)
-                    Text("思考中 \(String(format: "%.1f", ai.elapsed))s")
-                        .font(.caption2)
-                        .foregroundStyle(.white.opacity(0.9))
+                    ProgressView().tint(.white).scaleEffect(0.65)
+                    Text("\(String(format: "%.1f", ai.elapsed))s")
+                        .font(.caption2.monospacedDigit())
                 }
-                .padding(.horizontal, 10).padding(.vertical, 6)
-                .background(.black.opacity(0.35), in: Capsule())
+                .padding(.horizontal, 10).padding(.vertical, 7)
+                .background(.black.opacity(0.38), in: Capsule())
+                .foregroundStyle(.white)
                 .onTapGesture { showThinking = true }
             }
 
-            Spacer()
+            Button {
+                store.showOriginal.toggle()
+            } label: {
+                Image(systemName: store.showOriginal ? "eye.slash" : "eye")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(.white)
+                    .padding(8)
+                    .background(.black.opacity(0.38), in: Circle())
+            }
 
             Button { showSettings = true } label: {
                 Image(systemName: "gearshape")
-                    .font(.system(size: 16, weight: .medium))
+                    .font(.system(size: 15, weight: .medium))
                     .foregroundStyle(.white)
                     .padding(8)
-                    .background(.black.opacity(0.35), in: Circle())
+                    .background(.black.opacity(0.38), in: Circle())
             }
         }
         .padding(.horizontal, 16)
-        .padding(.top, 8)
+        .padding(.top, 6)
     }
 
     private var paramSummary: String {
-        let p = camera.captureParams
+        let p = store.capture
         if p.exposureMode == "manual" {
-            return String(format: "ISO%.0f · 1/%.0fs", p.iso, 1 / max(p.shutterSeconds, 0.0001))
+            return String(format: "ISO%.0f · 1/%.0f", p.iso, 1 / max(p.shutterSeconds, 0.0001))
         }
-        return String(format: "EV%+.1f · %.1f×", p.exposureBias, p.zoom)
+        return String(format: "EV%+.1f · %.1fx", p.exposureBias, p.zoom)
     }
 
     // MARK: 流式条
     private var streamingStrip: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Text(ai.thinking.isEmpty ? "正在读取画面…" : "思考中")
+                Text(ai.thinking.isEmpty ? "正在读取画面…" : "AI 思考中")
                     .font(.caption2.bold())
-                    .foregroundStyle(.white.opacity(0.7))
+                    .foregroundStyle(.white.opacity(0.75))
                 Spacer()
                 Button("展开") { showThinking = true }
-                    .font(.caption2)
-                    .foregroundStyle(.white)
+                    .font(.caption2).foregroundStyle(.white)
             }
-            Text(String(ai.thinking.suffix(160)))
+            Text(String(ai.thinking.suffix(150)))
                 .font(.caption2.monospaced())
                 .foregroundStyle(.white.opacity(0.85))
                 .lineLimit(4)
@@ -224,85 +201,129 @@ struct CameraView: View {
         .padding(12)
         .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 14))
         .padding(.horizontal, 16)
-        .padding(.bottom, 10)
+        .padding(.bottom, 8)
     }
 
-    // MARK: 底部
+    // MARK: 底栏
     private var bottomBar: some View {
         HStack(alignment: .center) {
-            Button { showParams = true } label: {
-                VStack(spacing: 4) {
-                    Image(systemName: "camera.aperture")
-                    Text("参数").font(.caption2)
+            Button { showManual = true } label: {
+                VStack(spacing: 5) {
+                    Image(systemName: "camera.aperture").font(.system(size: 20))
+                    Text("手动").font(.caption2)
                 }
-                .foregroundStyle(.white.opacity(0.85))
-                .frame(width: 60)
+                .foregroundStyle(.white.opacity(0.9))
+                .frame(width: 62)
             }
 
             Spacer()
 
-            // AI 主键
+            // AI：只截帧 + 下发参数，不拍照
             Button(action: askAI) {
                 ZStack {
                     Circle()
-                        .fill(LinearGradient(colors: [.white, .white.opacity(0.82)],
+                        .fill(LinearGradient(colors: [.white, .white.opacity(0.8)],
                                              startPoint: .top, endPoint: .bottom))
-                        .frame(width: 82, height: 82)
-                        .shadow(color: .white.opacity(0.25), radius: 18)
-                    VStack(spacing: 2) {
-                        Image(systemName: "sparkles")
-                            .font(.system(size: 22, weight: .semibold))
-                        Text("AI").font(.system(size: 11, weight: .bold))
+                        .frame(width: 72, height: 72)
+                        .shadow(color: .white.opacity(0.22), radius: 14)
+                    VStack(spacing: 1) {
+                        Image(systemName: "sparkles").font(.system(size: 20, weight: .semibold))
+                        Text("AI").font(.system(size: 10, weight: .bold))
                     }
                     .foregroundStyle(.black)
                     if isCapturing {
-                        Circle().stroke(.white.opacity(0.5), lineWidth: 3)
-                            .frame(width: 92, height: 92)
+                        Circle().stroke(.white.opacity(0.55), lineWidth: 3)
+                            .frame(width: 82, height: 82)
                     }
                 }
             }
-            .disabled(ai.isStreaming || isCapturing)
-            .opacity(ai.isStreaming ? 0.55 : 1)
+            .disabled(ai.isStreaming || isCapturing || isShooting)
+            .opacity(ai.isStreaming ? 0.5 : 1)
 
             Spacer()
 
-            Button {
-                showThinking = true
-            } label: {
-                VStack(spacing: 4) {
-                    Image(systemName: "brain")
-                    Text("思考").font(.caption2)
+            // 快门：用当前参数拍一张并保存
+            Button(action: shoot) {
+                ZStack {
+                    Circle().stroke(.white, lineWidth: 3).frame(width: 66, height: 66)
+                    Circle().fill(.white).frame(width: 54, height: 54)
+                    if isShooting {
+                        ProgressView().tint(.black)
+                    }
                 }
-                .foregroundStyle(.white.opacity(ai.thinking.isEmpty ? 0.35 : 0.9))
-                .frame(width: 60)
             }
-            .disabled(ai.thinking.isEmpty)
+            .disabled(isShooting || ai.isStreaming)
+            .frame(width: 62)
         }
-        .padding(.horizontal, 22)
+        .padding(.horizontal, 20)
         .padding(.bottom, 26)
     }
 
-    // MARK: 触发
+    private func permissionCard(_ err: String) -> some View {
+        VStack(spacing: 14) {
+            Image(systemName: "camera.metering.unknown")
+                .font(.system(size: 38, weight: .light))
+            Text(err).font(.callout).multilineTextAlignment(.center)
+            Button("打开设置") {
+                if let url = URL(string: UIApplication.openSettingsURLString) {
+                    UIApplication.shared.open(url)
+                }
+            }
+            .buttonStyle(.borderedProminent)
+        }
+        .foregroundStyle(.white)
+        .padding(26)
+        .background(.black.opacity(0.8), in: RoundedRectangle(cornerRadius: 20))
+        .padding(40)
+    }
+
+    // MARK: 动作
     private func askAI() {
         guard !ai.isStreaming else { return }
         isCapturing = true
+        baseline = store.grade
+        changes = []
+
         Task { @MainActor in
             do {
                 let data = try await camera.captureData()
                 let ci = CIImage(data: data, options: [.applyOrientationProperty: true])
-                let snap = CameraSnapshot(
-                    capture: camera.captureParams,
-                    grade: appliedGrade,
+                let snapshot = CameraSnapshot(
+                    capture: store.capture,
+                    grade: store.grade,
                     capabilities: camera.capabilities ?? .fallback,
                     exifSummary: SceneProbe.exif(for: nil),
                     sceneHints: ci.map { SceneProbe.hints(for: $0) } ?? [:]
                 )
-                ai.analyze(imageData: data, snapshot: snap, client: VisionClient(config: settings.config))
+                ai.analyze(imageData: data, snapshot: snapshot,
+                           client: VisionClient(config: settings.config))
                 showThinking = true
             } catch {
                 flash(error.localizedDescription)
             }
             isCapturing = false
+        }
+    }
+
+    private func shoot() {
+        isShooting = true
+        let grade = store.grade
+        Task { @MainActor in
+            do {
+                let image = try await camera.shoot()
+                guard let ci = CIImage(image: image)?.oriented(.right) else {
+                    throw NSError(domain: "photo", code: -1)
+                }
+                let out = renderer.render(ci, with: grade)
+                guard let ui = renderer.makeUIImage(out) else {
+                    throw NSError(domain: "photo", code: -2)
+                }
+                UIImageWriteToSavedPhotosAlbum(ui, nil, nil, nil)
+                flash("已保存到相册")
+            } catch {
+                flash(error.localizedDescription)
+            }
+            isShooting = false
         }
     }
 

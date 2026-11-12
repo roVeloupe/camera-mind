@@ -11,7 +11,9 @@ final class GradeRenderer {
     private let cubeDimension = 32
 
     // MARK: 入口
-    func render(_ image: CIImage, with p: GradeParameters, showOriginal: Bool = false) -> CIImage {
+    /// fast = 实时预览：用 16³ LUT、跳过逐帧噪声类滤镜
+    func render(_ image: CIImage, with p: GradeParameters,
+                showOriginal: Bool = false, fast: Bool = false) -> CIImage {
         if showOriginal { return image }
 
         var img = image
@@ -28,7 +30,7 @@ final class GradeRenderer {
             ])
         }
 
-        img = applyLUT(img, p)
+        img = applyLUT(img, p, fast: fast)
 
         if p.clarity != 0 {
             img = img.applyingFilter("CIUnsharpMask", parameters: [
@@ -77,14 +79,14 @@ final class GradeRenderer {
             img = img.applyingFilter("CISharpenLuminance", parameters: ["inputSharpness": p.sharpness * 1.5])
         }
 
-        if p.noiseReduction > 0 {
+        if !fast, p.noiseReduction > 0 {
             img = img.applyingFilter("CINoiseReduction", parameters: [
                 "inputNoiseLevel": p.noiseReduction * 0.06,
                 "inputSharpness": p.noiseReductionDetail * 0.6
             ])
         }
 
-        if p.bloom > 0 {
+        if !fast, p.bloom > 0 {
             img = img.applyingFilter("CIBloom", parameters: [
                 "inputRadius": 12.0, "inputIntensity": p.bloom
             ])
@@ -97,7 +99,7 @@ final class GradeRenderer {
             ])
         }
 
-        if p.grain > 0 {
+        if !fast, p.grain > 0 {
             img = applyGrain(img, amount: p.grain, size: p.grainSize)
         }
 
@@ -151,19 +153,20 @@ final class GradeRenderer {
     }
 
     // MARK: LUT
-    private func applyLUT(_ image: CIImage, _ p: GradeParameters) -> CIImage {
-        let key = lutKey(p)
+    private func applyLUT(_ image: CIImage, _ p: GradeParameters, fast: Bool) -> CIImage {
+        let dim = fast ? 16 : cubeDimension
+        let key = lutKey(p) + "|" + String(dim)
         let data: Data
         if let cached = lutCache[key] {
             data = cached
         } else {
-            data = buildCube(p)
-            if lutCache.count > 12 { lutCache.removeAll(keepingCapacity: true) }
+            data = buildCube(p, dimension: dim)
+            if lutCache.count > 16 { lutCache.removeAll(keepingCapacity: true) }
             lutCache[key] = data
         }
         guard let filter = CIFilter(name: "CIColorCubeWithColorSpace"),
               let space = CGColorSpace(name: CGColorSpace.sRGB) else { return image }
-        filter.setValue(cubeDimension, forKey: "inputCubeDimension")
+        filter.setValue(dim, forKey: "inputCubeDimension")
         filter.setValue(data, forKey: "inputCubeData")
         filter.setValue(space, forKey: "inputColorSpace")
         filter.setValue(image, forKey: kCIInputImageKey)
@@ -174,8 +177,8 @@ final class GradeRenderer {
         String(describing: p)
     }
 
-    private func buildCube(_ p: GradeParameters) -> Data {
-        let n = cubeDimension
+    private func buildCube(_ p: GradeParameters, dimension: Int) -> Data {
+        let n = dimension
         var cube = [Float](repeating: 0, count: n * n * n * 4)
         var idx = 0
 

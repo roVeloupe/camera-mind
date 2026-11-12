@@ -3,7 +3,7 @@ import Foundation
 /// 把流式 JSON 增量合并回参数结构。缺失字段沿用当前值，越界值夹到合法区间。
 enum AdjustmentParser {
 
-    struct Result {
+    struct Result: Equatable {
         var capture: CaptureParameters
         var grade: GradeParameters
         var rationale: [String: String]
@@ -36,14 +36,53 @@ enum AdjustmentParser {
     /// 把 patch 覆盖到 base 上再解码，天然支持"只返回部分字段"
     private static func merge<T: Codable>(_ base: T, _ patch: [String: Any]?) -> T? {
         guard let patch, !patch.isEmpty else { return base }
-        let enc = JSONEncoder()
-        guard var dict = (try? enc.encode(base))
-                .flatMap({ try? JSONSerialization.jsonObject(with: $0) }) as? [String: Any] else {
-            return nil
+
+        guard let baseData = try? JSONEncoder().encode(base) else { return nil }
+        let raw = try? JSONSerialization.jsonObject(with: baseData)
+        guard let rawDict = raw, var dict = rawDict as? [String: Any] else { return nil }
+
+        for (k, v) in patch where !(v is NSNull) {
+            dict[k] = v
         }
-        for (k, v) in patch { dict[k] = v }
         guard let data = try? JSONSerialization.data(withJSONObject: dict) else { return nil }
         return try? JSONDecoder().decode(T.self, from: data)
+    }
+}
+
+// MARK: - 变更清单
+struct ParamChange: Identifiable {
+    let id: String
+    var key: String { id }
+    let from: String
+    let to: String
+    let note: String?
+}
+
+extension AdjustmentParser {
+    /// 比较两套后期参数，列出真正变化的字段（最多 40 条）
+    static func diff(from old: GradeParameters,
+                     to new: GradeParameters,
+                     rationale: [String: String] = [:]) -> [ParamChange] {
+        let a = flatten(old), b = flatten(new)
+        var out: [ParamChange] = []
+        for (k, v) in b {
+            guard let o = a[k], o != v else { continue }
+            out.append(ParamChange(id: k, from: o, to: v, note: rationale[k]))
+        }
+        return out.sorted { $0.id < $1.id }.prefix(40).map { $0 }
+    }
+
+    private static func flatten<T: Encodable>(_ value: T) -> [String: String] {
+        guard let data = try? JSONEncoder().encode(value),
+              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        else { return [:] }
+        var out: [String: String] = [:]
+        for (k, v) in obj {
+            if v is [Any] { continue }
+            if let d = v as? Double { out[k] = String(format: "%.2f", d) }
+            else { out[k] = "\(v)" }
+        }
+        return out
     }
 }
 

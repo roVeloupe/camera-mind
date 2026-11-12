@@ -10,6 +10,9 @@ final class CameraController: NSObject, ObservableObject {
     @Published var captureParams = CaptureParameters.default
     @Published var lastError: String?
 
+    /// 每帧回调（实时预览调色用）
+    var onFrame: ((CVPixelBuffer) -> Void)?
+
     let session = AVCaptureSession()
     private let sessionQueue = DispatchQueue(label: "camera.session")
     private let photoOutput = AVCapturePhotoOutput()
@@ -198,6 +201,16 @@ final class CameraController: NSObject, ObservableObject {
         }
     }
 
+    /// 拍一张全尺寸照片（未调色），交给调用方套滤镜后保存
+    func shoot() async throws -> UIImage {
+        let data = try await capturePhotoData(maxDimension: 4096, quality: 0.95)
+        guard let image = UIImage(data: data) else {
+            throw NSError(domain: "camera", code: -2,
+                          userInfo: [NSLocalizedDescriptionKey: "照片解码失败"])
+        }
+        return image
+    }
+
     static func encode(buffer: CVPixelBuffer, maxDimension: CGFloat, quality: CGFloat) -> Data? {
         let ci = CIImage(cvPixelBuffer: buffer)
         let ctx = CIContext()
@@ -216,6 +229,7 @@ extension CameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
         bufferLock.lock()
         latestPixelBuffer = buffer
         bufferLock.unlock()
+        onFrame?(buffer)
     }
 }
 
