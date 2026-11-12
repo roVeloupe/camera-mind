@@ -52,21 +52,13 @@ struct ManualPanel: View {
             slider("变焦", $store.capture.zoom, 1...Double(min(capabilities?.maxZoom ?? 5, 10)),
                    format: "%.1fx")
 
-            slider("色温", $store.capture.temperature, 2000...9000, format: "%.0f K")
-            slider("色调", $store.capture.tint, -100...100, format: "%+.0f")
-
-            Toggle("锁定白平衡", isOn: Binding(
-                get: { store.capture.whiteBalanceMode == "locked" },
-                set: { store.capture.whiteBalanceMode = $0 ? "locked" : "auto" }
-            ))
-
             if camera.capabilities?.hasTorch == true {
                 slider("补光灯", $store.capture.torch, 0...1, format: "%.2f")
             }
         } header: {
             Text("硬件（实时生效）")
         } footer: {
-            Text("ISO 与快门只在手动曝光下有效；白平衡锁定后色温、色调才会下发给设备。")
+            Text("ISO、快门、曝光补偿与变焦直接作用于硬件。白平衡固定在自动，色温与色调请在下方「色彩」里调，走后期渲染。")
         }
     }
 

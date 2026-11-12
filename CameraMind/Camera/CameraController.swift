@@ -126,7 +126,8 @@ final class CameraController: NSObject, ObservableObject {
 
     // MARK: 应用硬件参数
     func apply(_ p: CaptureParameters) {
-        guard let dev = device else { return }
+        // session 停止时写参数会抛 NSException（Swift 接不住，直接 abort）
+        guard let dev = device, session.isRunning else { return }
         do {
             try dev.lockForConfiguration()
         } catch {
@@ -161,11 +162,9 @@ final class CameraController: NSObject, ObservableObject {
             dev.focusMode = .continuousAutoFocus
         }
 
-        // 白平衡
-        if p.whiteBalanceMode == "locked", dev.isWhiteBalanceModeSupported(.locked) {
-            let gains = WhiteBalance.gains(kelvin: p.temperature, tint: p.tint, maxGain: dev.maxWhiteBalanceGain)
-            dev.setWhiteBalanceModeLocked(with: gains)
-        } else {
+        // 白平衡：一律自动。硬件锁定要传 DeviceWhiteBalanceGains，
+        // 越界时 AVFoundation 抛 ObjC 异常（Swift 无法 catch），改由后期 CITemperatureAndTint 完成。
+        if dev.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) {
             dev.whiteBalanceMode = .continuousAutoWhiteBalance
         }
 
