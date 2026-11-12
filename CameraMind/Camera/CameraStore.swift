@@ -24,7 +24,17 @@ final class CameraStore: ObservableObject {
         grade = Self.decode(GradeParameters.self, key: gradeKey, fallback: .identity, defaults: defaults)
     }
 
+    private var saveWork: DispatchWorkItem?
+
+    /// 捏合缩放会高频触发，做 0.4s 防抖再落盘
     private func persist() {
+        saveWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.flush() }
+        saveWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: work)
+    }
+
+    private func flush() {
         if let d = try? JSONEncoder().encode(capture) { defaults.set(d, forKey: captureKey) }
         if let d = try? JSONEncoder().encode(grade) { defaults.set(d, forKey: gradeKey) }
     }

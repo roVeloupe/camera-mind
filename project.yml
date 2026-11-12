@@ -26,6 +26,7 @@ targets:
         NSPhotoLibraryAddUsageDescription: 需要保存拍摄的照片
         NSPhotoLibraryUsageDescription: 需要读取相册中的照片用于对比
         NSMicrophoneUsageDescription: 录制视频时需要收音
+        NSLocationWhenInUseUsageDescription: 用于把拍摄地点写入照片（与系统相机一致）
         UILaunchScreen: {}
         UIApplicationSupportsIndirectInputEvents: true
         UIRequiredDeviceCapabilities:

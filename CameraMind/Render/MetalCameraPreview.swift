@@ -43,6 +43,7 @@ struct MetalCameraPreview: UIViewRepresentable {
         private weak var controller: CameraController?
         private var latest: CVPixelBuffer?
         private var pending = false
+        private var startZoom: Double = 1.0
         private let renderer = GradeRenderer()
 
         func attach(view: MTKView, controller: CameraController) {
@@ -57,6 +58,29 @@ struct MetalCameraPreview: UIViewRepresentable {
                 self.latest = buffer
                 self.schedule()
             }
+
+            view.isUserInteractionEnabled = true
+            let pinch = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:)))
+            view.addGestureRecognizer(pinch)
+            let doubleTap = UITapGestureRecognizer(target: self, action: #selector(handleDoubleTap))
+            doubleTap.numberOfTapsRequired = 2
+            view.addGestureRecognizer(doubleTap)
+        }
+
+        @objc private func handlePinch(_ g: UIPinchGestureRecognizer) {
+            guard let controller else { return }
+            switch g.state {
+            case .began:
+                startZoom = controller.zoom
+            case .changed:
+                controller.setZoom(startZoom * Double(g.scale))
+            default:
+                break
+            }
+        }
+
+        @objc private func handleDoubleTap() {
+            controller?.setZoom(1.0)
         }
 
         func detach() {

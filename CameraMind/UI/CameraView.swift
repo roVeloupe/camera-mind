@@ -38,6 +38,7 @@ struct CameraView: View {
     @StateObject private var ai = AISession()
     @StateObject private var settings = AppSettings()
     @StateObject private var store = CameraStore()
+    @StateObject private var location = LocationProvider()
 
     @State private var showSettings = false
     @State private var showThinking = false
@@ -77,6 +78,7 @@ struct CameraView: View {
                 topBar
                 Spacer()
                 if ai.isStreaming { streamingStrip }
+                zoomBadge
                 bottomBar
             }
 
@@ -95,14 +97,18 @@ struct CameraView: View {
             }
         }
         .statusBarHidden()
-        .onAppear { camera.start() }
-        .onDisappear { camera.stop() }
+        .onAppear { camera.start(); location.start() }
+        .onDisappear { camera.stop(); location.stop() }
         .onChange(of: camera.isRunning) { _, running in
             // 每次恢复取景都重新下发一次，避免系统重置自动曝光
             if running { camera.apply(store.capture) }
         }
         .onChange(of: cameraShouldRun) { _, shouldRun in
-            if shouldRun { camera.start() } else { camera.stop() }
+            if shouldRun { camera.start(); location.start() }
+            else { camera.stop(); location.stop() }
+        }
+        .onChange(of: camera.zoom) { _, z in
+            store.capture.zoom = z
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
@@ -217,6 +223,22 @@ struct CameraView: View {
         .padding(.bottom, 8)
     }
 
+    private var zoomBadge: some View {
+        Button { camera.setZoom(1.0) } label: {
+            HStack(spacing: 6) {
+                Text(String(format: "%.1f×", camera.zoom))
+                    .font(.caption.bold().monospacedDigit())
+                Text(camera.lensDescription)
+                    .font(.caption2)
+                    .foregroundStyle(.white.opacity(0.75))
+            }
+            .padding(.horizontal, 10).padding(.vertical, 6)
+            .background(.black.opacity(0.45), in: Capsule())
+            .foregroundStyle(.white)
+        }
+        .padding(.bottom, 4)
+    }
+
     // MARK: 底栏
     private var bottomBar: some View {
         HStack(alignment: .center) {
@@ -301,11 +323,22 @@ struct CameraView: View {
             do {
                 let data = try await camera.captureData()
                 let ci = CIImage(data: data, options: [.applyOrientationProperty: true])
+                var exif = SceneProbe.exif(for: nil)
+                exif["当前镜头"] = camera.lensDescription
+                exif["变焦倍率"] = String(format: "%.2f×", camera.zoom)
+                if let loc = location.location {
+                    exif["GPS"] = String(format: "%.5f, %.5f (±%.0fm)",
+                                         loc.coordinate.latitude,
+                                         loc.coordinate.longitude,
+                                         loc.horizontalAccuracy)
+                } else {
+                    exif["GPS"] = "未获取"
+                }
                 let snapshot = CameraSnapshot(
                     capture: store.capture,
                     grade: store.grade,
                     capabilities: camera.capabilities ?? .fallback,
-                    exifSummary: SceneProbe.exif(for: nil),
+                    exifSummary: exif,
                     sceneHints: ci.map { SceneProbe.hints(for: $0) } ?? [:]
                 )
                 ai.analyze(imageData: data, snapshot: snapshot,
@@ -323,7 +356,7 @@ struct CameraView: View {
         let grade = store.grade
         Task { @MainActor in
             do {
-                let image = try await camera.shoot()
+                let (image, metadata) = try await camera.shoot()
                 // UIImage 已带上方向信息，避免再转一次
                 guard let ci = CIImage(image: image,
                                        options: [.applyOrientationProperty: true]) else {
@@ -333,8 +366,11 @@ struct CameraView: View {
                 guard let ui = renderer.makeUIImage(out) else {
                     throw NSError(domain: "photo", code: -2)
                 }
-                UIImageWriteToSavedPhotosAlbum(ui, nil, nil, nil)
-                flash("已保存到相册")
+                try await PhotoSaver.save(image: ui,
+                                          metadata: metadata,
+                                          grade: grade,
+                                          location: location.location)
+                flash("已保存 HEIC 到相册")
             } catch {
                 flash(error.localizedDescription)
             }

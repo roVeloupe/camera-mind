@@ -13,12 +13,18 @@ final class CameraController: NSObject, ObservableObject {
     /// 每帧回调（实时预览调色用）
     var onFrame: ((CVPixelBuffer) -> Void)?
 
+    /// 当前缩放（与 Apple 一致：虚拟设备直接改 videoZoomFactor，系统负责切镜头）
+    @Published private(set) var zoom: Double = 1.0
+    @Published private(set) var minZoom: Double = 1.0
+    @Published private(set) var maxZoom: Double = 5.0
+    @Published private(set) var switchOvers: [Double] = []
+
     let session = AVCaptureSession()
     private let sessionQueue = DispatchQueue(label: "camera.session")
     private let photoOutput = AVCapturePhotoOutput()
     private let videoOutput = AVCaptureVideoDataOutput()
     private var device: AVCaptureDevice?
-    private var photoContinuation: CheckedContinuation<Data, Error>?
+    private var photoContinuation: CheckedContinuation<(Data, [String: Any]), Error>?
     private let ciContext = CIContext()
 
     // 最新一帧（用于 AI 分析，比拍照快）
@@ -97,6 +103,7 @@ final class CameraController: NSObject, ObservableObject {
 
         session.commitConfiguration()
         publishCapabilities(for: dev)
+        publishZoomRange(for: dev)
     }
 
     private func publishCapabilities(for dev: AVCaptureDevice) {
@@ -122,6 +129,37 @@ final class CameraController: NSObject, ObservableObject {
             sensorHeight: Int(dev.activeFormat.formatDescription.dimensions.height)
         )
         DispatchQueue.main.async { self.capabilities = caps }
+    }
+
+    private func publishZoomRange(for dev: AVCaptureDevice) {
+        let lo = Double(dev.minAvailableVideoZoomFactor)
+        let hi = Double(min(dev.maxAvailableVideoZoomFactor, 15))
+        let overs = dev.virtualDeviceSwitchOverVideoZoomFactors.map { $0.doubleValue }
+        DispatchQueue.main.async {
+            self.minZoom = lo
+            self.maxZoom = hi
+            self.switchOvers = overs
+            self.zoom = Double(dev.videoZoomFactor)
+        }
+    }
+
+    /// 当前镜头的人话描述（Apple 用 0.5×/1×/3×，这里给中文名）
+    var lensDescription: String {
+        if zoom < 0.99 { return "超广角" }
+        if let first = switchOvers.first, zoom >= first { return "长焦" }
+        return "广角（主摄）"
+    }
+
+    /// 捏合缩放：直接改虚拟设备的 videoZoomFactor，物理镜头由系统切换
+    func setZoom(_ value: Double) {
+        guard let dev = device, session.isRunning else { return }
+        let clamped = min(max(value, minZoom), maxZoom)
+        do { try dev.lockForConfiguration() } catch { return }
+        dev.videoZoomFactor = CGFloat(clamped)
+        dev.unlockForConfiguration()
+
+        zoom = clamped
+        captureParams.zoom = clamped
     }
 
     // MARK: 应用硬件参数
@@ -185,7 +223,7 @@ final class CameraController: NSObject, ObservableObject {
     /// 给 AI 的帧：长边缩到原图的 1/4（4032 → 约 1008），再压到 0.7。
     /// 只影响上传，不影响成片。
     func captureData() async throws -> Data {
-        let original = try await captureRawPhoto()
+        let (original, _) = try await captureRawPhoto()
         guard let image = UIImage(data: original) else { return original }
         let longSide = max(image.size.width, image.size.height)
         let target = min(max(longSide / 4.0, 384), 1024)
@@ -193,18 +231,18 @@ final class CameraController: NSObject, ObservableObject {
     }
 
     /// 快门：原图直出，不缩放、不二次压缩，交给调用方套调色后保存。
-    func shoot() async throws -> UIImage {
-        let data = try await captureRawPhoto()
+    func shoot() async throws -> (UIImage, [String: Any]) {
+        let (data, metadata) = try await captureRawPhoto()
         guard let image = UIImage(data: data) else {
             throw NSError(domain: "camera", code: -2,
                           userInfo: [NSLocalizedDescriptionKey: "照片解码失败"])
         }
-        return image
+        return (image, metadata)
     }
 
-    /// 原图数据（系统直接给的 HEIC/JPEG，未经我们重编码）
-    private func captureRawPhoto() async throws -> Data {
-        return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Data, Error>) in
+    /// 原图数据（系统直接给的 HEIC/JPEG，未经我们重编码）+ 相机原始元数据
+    private func captureRawPhoto() async throws -> (Data, [String: Any]) {
+        return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<(Data, [String: Any]), Error>) in
             self.photoContinuation = cont
             let settings = AVCapturePhotoSettings()
             settings.photoQualityPrioritization = .quality
@@ -250,7 +288,7 @@ extension CameraController: AVCapturePhotoCaptureDelegate {
             photoContinuation?.resume(throwing: NSError(domain: "camera", code: -1))
             return
         }
-        photoContinuation?.resume(returning: data)
+        photoContinuation?.resume(returning: (data, photo.metadata))
     }
 }
 
