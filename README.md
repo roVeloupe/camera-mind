@@ -33,6 +33,13 @@ App 内右上角齿轮：
 思考必须由服务端开启，客户端只能"请求"。选错不会报错，只是思考面板为空——JSON 依然正常流式返回。
 若服务端拒绝 `response_format: json_object`（部分多模态接口不支持），客户端会自动去掉该字段重试一次。
 
+### 模型要求（重要）
+
+这个 App 依赖模型输出**结构化参数**。实测 `hy4free` 是 `only_reasoning` 模型：`content` 里装的是思维链，
+既不会调工具，也不肯只输出 JSON（纯提示词、`response_format`、`json_object` 都试过）。
+客户端已做四层降级（tool call → assistant 预填 `{` → json_object → 纯文本），并会修复模板残留与全角标点，
+但**换成支持结构化输出的视觉模型（Qwen-VL / GLM-4.6V / Gemini Flash 等）才能稳定工作**。
+
 ### 该网关的实测特性（2026-11-11）
 
 - 图片必须用 **base64 data URI**，传公网 URL 会被上游以 `400 invalid_request / 11133` 拒绝。

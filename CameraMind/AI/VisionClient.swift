@@ -26,6 +26,7 @@ final class VisionClient {
     /// 一次请求的形态，按可靠性从高到低重试
     private enum Mode {
         case toolAuto     // tools + tool_choice=auto
+        case prefill      // 预填 assistant="{"，逼模型接着写 JSON
         case jsonObject   // response_format=json_object
         case plain        // 什么都不加
     }
@@ -42,7 +43,7 @@ final class VisionClient {
             let task = Task { [config] in
                 var modes: [Mode] = []
                 if config.useTools { modes.append(.toolAuto) }
-                modes += [.jsonObject, .plain]
+                modes += [.prefill, .jsonObject, .plain]
 
                 for (index, mode) in modes.enumerated() {
                     if index > 0 { continuation.yield(.reset) }
@@ -77,9 +78,13 @@ final class VisionClient {
                                mode: Mode,
                                into continuation: AsyncThrowingStream<Event, Error>.Continuation) async throws -> Bool {
         var argsBuffer = ""
-        var contentBuffer = ""
+        var contentBuffer = (mode == .prefill ? "{" : "")
         let request = try buildRequest(config: config, imageJPEG: imageJPEG,
                                        snapshot: snapshot, mode: mode)
+        if mode == .prefill {
+            // 补回被我们预填掉的那个 "{"
+            continuation.yield(.content("{"))
+        }
         let (bytes, response) = try await URLSession.shared.bytes(for: request)
         guard let http = response as? HTTPURLResponse else { throw ClientError.badResponse }
         guard (200..<300).contains(http.statusCode) else {
@@ -156,6 +161,11 @@ final class VisionClient {
         case .toolAuto:
             body["tools"] = tools
             body["tool_choice"] = "auto"
+        case .prefill:
+            // assistant 预填一个左括号，模型只能接着把 JSON 写完
+            var msgs = body["messages"] as? [[String: Any]] ?? []
+            msgs.append(["role": "assistant", "content": "{"])
+            body["messages"] = msgs
         case .jsonObject:
             body["response_format"] = ["type": "json_object"]
         case .plain:
@@ -170,7 +180,7 @@ final class VisionClient {
 
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
-        req.timeoutInterval = 45
+        req.timeoutInterval = 30
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
@@ -370,7 +380,41 @@ enum StreamingJSON {
             }
         }
         guard let start = s.firstIndex(of: "{") else { return "" }
-        return String(s[start...])
+        return normalize(String(s[start...]))
+    }
+
+    /// 清理模型输出的"人味"：模板残留（/think、literal> 之类）与全角标点
+    static func normalize(_ s: String) -> String {
+        guard s.hasPrefix("{") else { return s }
+        var chars = Array(s)
+
+        // 跳到第一个真正的 key 引号，丢掉 {"{/think|"capture"...} 里的垃圾
+        var i = 1
+        while i < chars.count, chars[i] != "\"", chars[i] != "}" { i += 1 }
+        if i > 1 { chars = ["{"] + chars[i...] }
+
+        var out = ""
+        var inString = false
+        var escaped = false
+        for ch in chars {
+            if escaped { out.append(ch); escaped = false; continue }
+            if inString {
+                out.append(ch)
+                if ch == "\\" { escaped = true }
+                else if ch == "\"" { inString = false }
+                continue
+            }
+            switch ch {
+            case "\"": inString = true; out.append(ch)
+            case "，": out.append(",")
+            case "：": out.append(":")
+            case "；": out.append(";")
+            case "｛": out.append("{")
+            case "｝": out.append("}")
+            default: out.append(ch)
+            }
+        }
+        return out
     }
 
     static func parse(_ raw: String) -> [String: Any]? {
