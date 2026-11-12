@@ -341,6 +341,8 @@ final class VisionClient {
     }
 
 
+}
+
 // MARK: - 错误
 enum ClientError: LocalizedError {
     case badResponse
