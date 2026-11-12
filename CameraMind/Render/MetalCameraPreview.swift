@@ -38,6 +38,7 @@ struct MetalCameraPreview: UIViewRepresentable {
         var showOriginal = false
 
         private var ciContext: CIContext?
+        private var commandQueue: MTLCommandQueue?
         private weak var view: MTKView?
         private weak var controller: CameraController?
         private var latest: CVPixelBuffer?
@@ -49,6 +50,7 @@ struct MetalCameraPreview: UIViewRepresentable {
             self.controller = controller
             if let device = view.device {
                 ciContext = CIContext(mtlDevice: device, options: [.cacheIntermediates: false])
+                commandQueue = device.makeCommandQueue()
             }
             controller.onFrame = { [weak self] buffer in
                 guard let self else { return }
@@ -79,8 +81,7 @@ struct MetalCameraPreview: UIViewRepresentable {
             guard let buffer = latest,
                   let ctx = ciContext,
                   let drawable = view.currentDrawable,
-                  let queue = view.commandQueue,
-                  let commandBuffer = queue.makeCommandBuffer() else { return }
+                  let commandBuffer = commandQueue?.makeCommandBuffer() else { return }
 
             var image = CIImage(cvPixelBuffer: buffer).oriented(.right)
             image = renderer.render(image, with: grade, showOriginal: showOriginal, fast: true)
