@@ -19,7 +19,6 @@ final class VisionClient {
         case reasoning(String)   // 模型自身 thinking 增量
         case toolArgs(String)    // tool call 的 arguments 增量（JSON 片段）
         case content(String)     // 正文增量（JSON 模式下才有）
-        case reset              // 换一种请求形态重试，清空已收内容
         case done
     }
 
@@ -41,12 +40,16 @@ final class VisionClient {
     func analyze(imageJPEG: Data, snapshot: CameraSnapshot) -> AsyncThrowingStream<Event, Error> {
         AsyncThrowingStream { continuation in
             let task = Task { [config] in
-                var modes: [Mode] = []
+                // 预填最容易命中（尤其对只推理模型）；工具调用作为第二选择
+                var modes: [Mode] = [.prefill]
                 if config.useTools { modes.append(.toolAuto) }
-                modes += [.prefill, .jsonObject, .plain]
+                modes.append(.jsonObject)
 
                 for (index, mode) in modes.enumerated() {
-                    if index > 0 { continuation.yield(.reset) }
+                    if index > 0 {
+                        // 只做分隔，绝不清空已收到的内容
+                        continuation.yield(.reasoning("\n\n—— 换一种格式重试 ——\n\n"))
+                    }
                     do {
                         let usable = try await Self.stream(config: config,
                                                            imageJPEG: imageJPEG,
@@ -117,6 +120,9 @@ final class VisionClient {
                        let args = fn["arguments"] as? String, !args.isEmpty {
                         argsBuffer += args
                         continuation.yield(.toolArgs(args))
+                        if args.contains("}"), StreamingJSON.looksLikeParams(argsBuffer) {
+                            return true
+                        }
                     }
                 }
             }
@@ -124,6 +130,10 @@ final class VisionClient {
             if let s = delta["content"] as? String, !s.isEmpty {
                 contentBuffer += s
                 continuation.yield(.content(s))
+                // 一旦凑齐可用 JSON 就停，避免继续跑到下一层重试
+                if s.contains("}"), StreamingJSON.looksLikeParams(contentBuffer) {
+                    return true
+                }
             }
         }
 

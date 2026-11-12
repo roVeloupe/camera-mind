@@ -52,10 +52,6 @@ final class AISession: ObservableObject {
                                                    baseGrade: snapshot.grade) {
                             self.result = parsed
                         }
-                    case .reset:
-                        // 换一种请求形态重试，丢弃上一种的正文，思考保留
-                        self.rawJSON = ""
-                        self.result = nil
                     case .done:
                         break
                     }
@@ -86,8 +82,12 @@ final class AISession: ObservableObject {
         if let r = AdjustmentParser.parse(raw: rawJSON,
                                           baseCapture: baseCapture,
                                           baseGrade: baseGrade) { return r }
-        return AdjustmentParser.parse(raw: thinking,
-                                      baseCapture: baseCapture,
-                                      baseGrade: baseGrade)
+        // 思考通道里常有示例 JSON，只在解析出完整对象时才采信
+        if let r = AdjustmentParser.parse(raw: thinking,
+                                          baseCapture: baseCapture,
+                                          baseGrade: baseGrade), r.isComplete {
+            return r
+        }
+        return nil
     }
 }
