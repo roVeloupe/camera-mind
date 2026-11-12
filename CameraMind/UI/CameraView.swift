@@ -311,7 +311,9 @@ struct CameraView: View {
         Task { @MainActor in
             do {
                 let image = try await camera.shoot()
-                guard let ci = CIImage(image: image)?.oriented(.right) else {
+                // UIImage 已带上方向信息，避免再转一次
+                guard let ci = CIImage(image: image,
+                                       options: [.applyOrientationProperty: true]) else {
                     throw NSError(domain: "photo", code: -1)
                 }
                 let out = renderer.render(ci, with: grade)

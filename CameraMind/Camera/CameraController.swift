@@ -182,33 +182,40 @@ final class CameraController: NSObject, ObservableObject {
     }
 
     // MARK: 抓帧
-    func captureData(maxDimension: CGFloat = 1536, quality: CGFloat = 0.85) async throws -> Data {
-        // 走拍照通道：画质更好，且缓冲由系统管理，不会读到已回收的帧
-        return try await capturePhotoData(maxDimension: maxDimension, quality: quality)
+
+    /// 给 AI 的帧：长边缩到原图的 1/4（4032 → 约 1008），再压到 0.7。
+    /// 只影响上传，不影响成片。
+    func captureData() async throws -> Data {
+        let original = try await captureRawPhoto()
+        guard let image = UIImage(data: original) else { return original }
+        let longSide = max(image.size.width, image.size.height)
+        let target = min(max(longSide / 4.0, 384), 1024)
+        return image.resized(maxDimension: target).jpegData(compressionQuality: 0.7) ?? original
     }
 
-    private func currentPixelBuffer() -> CVPixelBuffer? {
-        bufferLock.lock(); defer { bufferLock.unlock() }
-        return latestPixelBuffer
-    }
-
-    private func capturePhotoData(maxDimension: CGFloat, quality: CGFloat) async throws -> Data {
-        return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Data, Error>) in
-            self.photoContinuation = cont
-            let settings = AVCapturePhotoSettings()
-            settings.photoQualityPrioritization = .balanced
-            self.photoOutput.capturePhoto(with: settings, delegate: self)
-        }
-    }
-
-    /// 拍一张全尺寸照片（未调色），交给调用方套滤镜后保存
+    /// 快门：原图直出，不缩放、不二次压缩，交给调用方套调色后保存。
     func shoot() async throws -> UIImage {
-        let data = try await capturePhotoData(maxDimension: 4096, quality: 0.95)
+        let data = try await captureRawPhoto()
         guard let image = UIImage(data: data) else {
             throw NSError(domain: "camera", code: -2,
                           userInfo: [NSLocalizedDescriptionKey: "照片解码失败"])
         }
         return image
+    }
+
+    /// 原图数据（系统直接给的 HEIC/JPEG，未经我们重编码）
+    private func captureRawPhoto() async throws -> Data {
+        return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Data, Error>) in
+            self.photoContinuation = cont
+            let settings = AVCapturePhotoSettings()
+            settings.photoQualityPrioritization = .quality
+            self.photoOutput.capturePhoto(with: settings, delegate: self)
+        }
+    }
+
+    private func currentPixelBuffer() -> CVPixelBuffer? {
+        bufferLock.lock(); defer { bufferLock.unlock() }
+        return latestPixelBuffer
     }
 
     static func encode(buffer: CVPixelBuffer, maxDimension: CGFloat, quality: CGFloat) -> Data? {
@@ -240,12 +247,11 @@ extension CameraController: AVCapturePhotoCaptureDelegate {
                      error: Error?) {
         defer { photoContinuation = nil }
         if let error { photoContinuation?.resume(throwing: error); return }
-        guard let data = photo.fileDataRepresentation(),
-              let image = UIImage(data: data) else {
+        guard let data = photo.fileDataRepresentation() else {
             photoContinuation?.resume(throwing: NSError(domain: "camera", code: -1))
             return
         }
-        photoContinuation?.resume(returning: image.resized(maxDimension: 1536).jpegData(compressionQuality: 0.85) ?? data)
+        photoContinuation?.resume(returning: data)
     }
 }
 
