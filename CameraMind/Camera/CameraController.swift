@@ -297,13 +297,37 @@ extension CameraController: AVCapturePhotoCaptureDelegate {
 
 // MARK: - 工具
 extension UIImage {
+    /// 应用 EXIF 方向后的真实尺寸。UIImage.size 是不带方向的，直接用会算出相反的宽高比。
+    var orientedSize: CGSize {
+        switch imageOrientation {
+        case .left, .leftMirrored, .right, .rightMirrored:
+            return CGSize(width: size.height, height: size.width)
+        default:
+            return size
+        }
+    }
+
+    /// 把像素按方向摆正，返回 orientation == .up 的图
+    func normalizedUp() -> UIImage {
+        guard imageOrientation != .up else { return self }
+        let target = orientedSize
+        let renderer = UIGraphicsImageRenderer(size: target)
+        return renderer.image { _ in
+            draw(in: CGRect(origin: .zero, size: target))
+        }
+    }
+
     func resized(maxDimension: CGFloat) -> UIImage {
-        let longest = max(size.width, size.height)
-        guard longest > maxDimension else { return self }
+        let base = normalizedUp()
+        let longest = max(base.size.width, base.size.height)
+        guard longest > maxDimension else { return base }
         let scale = maxDimension / longest
-        let newSize = CGSize(width: size.width * scale, height: size.height * scale)
+        let newSize = CGSize(width: (base.size.width * scale).rounded(),
+                             height: (base.size.height * scale).rounded())
         let renderer = UIGraphicsImageRenderer(size: newSize)
-        return renderer.image { _ in draw(in: CGRect(origin: .zero, size: newSize)) }
+        return renderer.image { _ in
+            base.draw(in: CGRect(origin: .zero, size: newSize))
+        }
     }
 }
 
