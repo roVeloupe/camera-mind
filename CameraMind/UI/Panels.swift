@@ -49,8 +49,10 @@ struct ManualPanel: View {
                 slider("曝光补偿", $store.capture.exposureBias, -2...2, format: "%+.1f EV")
             }
 
-            slider("变焦", $store.capture.zoom, 1...Double(min(capabilities?.maxZoom ?? 5, 10)),
-                   format: "%.1fx")
+            slider("变焦", Binding(
+                get: { camera.zoom },
+                set: { camera.setZoom($0) }
+            ), camera.minZoom...max(camera.minZoom + 0.01, camera.maxZoom), format: "%.1f×")
 
             if camera.capabilities?.hasTorch == true {
                 slider("补光灯", $store.capture.torch, 0...1, format: "%.2f")

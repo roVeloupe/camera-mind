@@ -18,6 +18,8 @@ final class CameraController: NSObject, ObservableObject {
     @Published private(set) var minZoom: Double = 1.0
     @Published private(set) var maxZoom: Double = 5.0
     @Published private(set) var switchOvers: [Double] = []
+    /// 主摄对应的 videoZoomFactor（显示倍率 = 虚拟倍率 / 该值）
+    private var virtualBase: Double = 1.0
 
     let session = AVCaptureSession()
     private let sessionQueue = DispatchQueue(label: "camera.session")
@@ -131,35 +133,45 @@ final class CameraController: NSObject, ObservableObject {
         DispatchQueue.main.async { self.capabilities = caps }
     }
 
+    /// 主摄在虚拟设备里的 videoZoomFactor。
+    /// 带超广角时，虚拟设备的 1.0 是最广那颗，主摄要乘到 2.0；不带的机型 1.0 就是主摄。
     private func publishZoomRange(for dev: AVCaptureDevice) {
-        let lo = Double(dev.minAvailableVideoZoomFactor)
-        let hi = Double(min(dev.maxAvailableVideoZoomFactor, 15))
-        let overs = dev.virtualDeviceSwitchOverVideoZoomFactors.map { $0.doubleValue }
+        let hasUltraWide = dev.constituentDevices.contains { $0.deviceType == .builtInUltraWideCamera }
+            || AVCaptureDevice.default(.builtInUltraWideCamera, for: .video, position: .back) != nil
+        let rawOvers = dev.virtualDeviceSwitchOverVideoZoomFactors.map { $0.doubleValue }
+        let base = hasUltraWide ? (rawOvers.first ?? 2.0) : 1.0
+
+        let minVirtual = Double(dev.minAvailableVideoZoomFactor)
+        let maxVirtual = min(Double(dev.maxAvailableVideoZoomFactor), 15)
+
         DispatchQueue.main.async {
-            self.minZoom = lo
-            self.maxZoom = hi
-            self.switchOvers = overs
-            self.zoom = Double(dev.videoZoomFactor)
+            self.virtualBase = base
+            self.minZoom = minVirtual / base
+            self.maxZoom = maxVirtual / base
+            self.switchOvers = rawOvers.map { $0 / base }
+            self.zoom = Double(dev.videoZoomFactor) / base
         }
     }
 
     /// 当前镜头的人话描述（Apple 用 0.5×/1×/3×，这里给中文名）
     var lensDescription: String {
         if zoom < 0.99 { return "超广角" }
-        if let first = switchOvers.first, zoom >= first { return "长焦" }
+        let tele = switchOvers.dropFirst().first
+            ?? (switchOvers.first.flatMap { $0 > 1.01 ? $0 : nil })
+        if let tele, zoom >= tele - 0.01 { return "长焦" }
         return "广角（主摄）"
     }
 
     /// 捏合缩放：直接改虚拟设备的 videoZoomFactor，物理镜头由系统切换
     func setZoom(_ value: Double) {
         guard let dev = device, session.isRunning else { return }
-        let clamped = min(max(value, minZoom), maxZoom)
+        let display = min(max(value, minZoom), maxZoom)
         do { try dev.lockForConfiguration() } catch { return }
-        dev.videoZoomFactor = CGFloat(clamped)
+        dev.videoZoomFactor = CGFloat(display * virtualBase)
         dev.unlockForConfiguration()
 
-        zoom = clamped
-        captureParams.zoom = clamped
+        zoom = display
+        captureParams.zoom = display
     }
 
     // MARK: 应用硬件参数
@@ -176,10 +188,10 @@ final class CameraController: NSObject, ObservableObject {
         defer { dev.unlockForConfiguration() }
 
         // 变焦
-        let zoom = max(minZoom, min(p.zoom, maxZoom))
-        dev.videoZoomFactor = CGFloat(zoom)
-        self.zoom = zoom
-        p.zoom = zoom
+        let display = max(minZoom, min(p.zoom, maxZoom))
+        dev.videoZoomFactor = CGFloat(display * virtualBase)
+        self.zoom = display
+        p.zoom = display
 
         // 曝光
         if p.exposureMode == "manual", dev.isExposureModeSupported(.custom) {
