@@ -60,6 +60,9 @@ final class AISession: ObservableObject {
                 if let parsed = self.parse(baseCapture: snapshot.capture,
                                            baseGrade: snapshot.grade) {
                     self.result = parsed
+                    if !parsed.isComplete {
+                        self.errorMessage = "参数不完整，只应用了调色，硬件参数未下发"
+                    }
                 } else if !self.rawJSON.isEmpty || !self.thinking.isEmpty {
                     self.errorMessage = "该模型没有返回参数（不支持工具调用/JSON）。请换一个支持结构化输出的模型"
                 }

@@ -163,7 +163,8 @@ final class CameraController: NSObject, ObservableObject {
     }
 
     // MARK: 应用硬件参数
-    func apply(_ p: CaptureParameters) {
+    func apply(_ incoming: CaptureParameters) {
+        var p = incoming
         // session 停止时写参数会抛 NSException（Swift 接不住，直接 abort）
         guard let dev = device, session.isRunning else { return }
         do {
@@ -175,8 +176,10 @@ final class CameraController: NSObject, ObservableObject {
         defer { dev.unlockForConfiguration() }
 
         // 变焦
-        let zoom = max(1.0, min(p.zoom, Double(min(dev.maxAvailableVideoZoomFactor, 15))))
+        let zoom = max(minZoom, min(p.zoom, maxZoom))
         dev.videoZoomFactor = CGFloat(zoom)
+        self.zoom = zoom
+        p.zoom = zoom
 
         // 曝光
         if p.exposureMode == "manual", dev.isExposureModeSupported(.custom) {

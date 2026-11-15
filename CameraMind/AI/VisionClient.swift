@@ -120,7 +120,7 @@ final class VisionClient {
                        let args = fn["arguments"] as? String, !args.isEmpty {
                         argsBuffer += args
                         continuation.yield(.toolArgs(args))
-                        if args.contains("}"), StreamingJSON.looksLikeParams(argsBuffer) {
+                        if StreamingJSON.isCompleteParams(argsBuffer) {
                             return true
                         }
                     }
@@ -130,8 +130,9 @@ final class VisionClient {
             if let s = delta["content"] as? String, !s.isEmpty {
                 contentBuffer += s
                 continuation.yield(.content(s))
-                // 一旦凑齐可用 JSON 就停，避免继续跑到下一层重试
-                if s.contains("}"), StreamingJSON.looksLikeParams(contentBuffer) {
+                // 只有拿到"闭合完整"的参数对象才提前收工；
+                // 半截 JSON 提前 return 会让 isComplete 永远为 false
+                if s.contains("}"), StreamingJSON.isCompleteParams(contentBuffer) {
                     return true
                 }
             }
@@ -469,14 +470,20 @@ enum StreamingJSON {
         return nil
     }
 
-    private static func isParamObject(_ obj: [String: Any]) -> Bool {
+    static func isParamObject(_ obj: [String: Any]) -> Bool {
         obj["capture"] != nil || obj["grade"] != nil
     }
 
-    /// 文本里是否已出现可用的参数对象（用于判断这次请求是否"成功"）
+    /// 文本里是否已出现可用的参数对象（允许半截，用于判断"要不要继续重试"）
     static func looksLikeParams(_ raw: String) -> Bool {
         guard let (obj, _) = extract(raw) else { return false }
         return isParamObject(obj)
+    }
+
+    /// 是否已经拿到闭合完整的参数对象（用于"可以停止读取"）
+    static func isCompleteParams(_ raw: String) -> Bool {
+        guard let (obj, complete) = extract(raw) else { return false }
+        return complete && isParamObject(obj)
     }
 
     private static func matchBrace(_ chars: [Character], from start: Int) -> Int? {
