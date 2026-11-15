@@ -432,9 +432,43 @@ enum StreamingJSON {
         extract(raw)?.obj
     }
 
+    /// 有些模型（或网关）会把工具调用原样写在正文里：
+    /// <|DSML| invoke name="apply_camera_settings"> <|DSML| parameter name="grade"> {...} ...
+    static func fromToolMarkup(_ raw: String) -> (obj: [String: Any], complete: Bool)? {
+        let text = raw.replacingOccurrences(of: "｜", with: "|")
+        guard text.contains("parameter"), text.contains("invoke") else { return nil }
+
+        let pattern = #"parameter\s+name="([^"]+)"[^>]*>([\s\S]*?)</[^>]*?parameter>"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let ns = text as NSString
+        var dict: [String: Any] = [:]
+
+        for match in regex.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+            guard match.numberOfRanges >= 3 else { continue }
+            let name = ns.substring(with: match.range(at: 1))
+            let body = ns.substring(with: match.range(at: 2))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if let data = body.data(using: .utf8),
+               let value = try? JSONSerialization.jsonObject(with: data) {
+                dict[name] = value
+            } else if !body.isEmpty {
+                dict[name] = body
+            }
+        }
+
+        guard isParamObject(dict) else { return nil }
+
+        let complete = (try? NSRegularExpression(pattern: #"</[^>]*?invoke>"#))
+            .map { $0.firstMatch(in: text, range: NSRange(location: 0, length: ns.length)) != nil } ?? false
+        return (dict, complete)
+    }
+
     /// 从任意文本里挖出 JSON 对象。
     /// 关键：模型输出的 hsl 里还有嵌套对象，必须优先取包含 capture/grade 的最外层。
     static func extract(_ raw: String) -> (obj: [String: Any], complete: Bool)? {
+        // 先看是不是"文本形态的工具调用"
+        if let markup = fromToolMarkup(raw) { return markup }
+
         let cleaned = sanitize(raw)
         guard !cleaned.isEmpty else { return nil }
 
